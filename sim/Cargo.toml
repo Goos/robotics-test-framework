@@ -4,3 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 
 [dependencies]
+rtf_core = { path = "../core" }
+nalgebra.workspace = true
+rand.workspace = true
+rand_pcg.workspace = true

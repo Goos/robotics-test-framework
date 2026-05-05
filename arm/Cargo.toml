@@ -4,3 +4,6 @@ version = "0.1.0"
 edition.workspace = true
 
 [dependencies]
+rtf_core = { path = "../core" }
+rtf_sim = { path = "../sim" }
+nalgebra.workspace = true
