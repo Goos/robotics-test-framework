@@ -1,9 +1,12 @@
-use std::cell::Cell;
+use core::cell::Cell;
 
 use crate::time::{Duration, Time};
 
 /// Source of monotonic simulated time. Inject into anything that needs `now()`
 /// — never call `std::time::Instant::now()` in core/sim (design §10.2).
+///
+/// Single-threaded by design v2 §10.3; the trait does not require `Send`/`Sync`.
+/// The eventual real-hardware `MonotonicClock` will fit the same shape.
 pub trait Clock {
     fn now(&self) -> Time;
 }
