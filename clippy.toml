@@ -1,0 +1,9 @@
+disallowed-types = [
+    { path = "std::collections::HashMap", reason = "use BTreeMap; HashMap iteration is nondeterministic (design §10.2)" },
+    { path = "std::collections::HashSet", reason = "use BTreeSet (design §10.2)" },
+    { path = "std::time::Instant", reason = "inject Clock; Instant::now() is forbidden in core/sim (design §10.2)" },
+]
+
+disallowed-methods = [
+    { path = "std::thread::spawn", reason = "single-threaded only (design §10.2)" },
+]

@@ -11,3 +11,7 @@ smallvec = "1"
 rand = { version = "0.8", default-features = false }
 rand_pcg = "0.3"
 rerun = { version = "0.21", default-features = false, features = ["sdk"] }
+
+[workspace.lints.clippy]
+disallowed_types = { level = "deny", priority = 1 }
+disallowed_methods = { level = "deny", priority = 1 }

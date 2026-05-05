@@ -6,3 +6,6 @@ edition.workspace = true
 [dependencies]
 rtf_sim = { path = "../sim" }
 rerun = { workspace = true, optional = true }
+
+[lints]
+workspace = true

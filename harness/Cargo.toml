@@ -6,3 +6,6 @@ edition.workspace = true
 [dependencies]
 rtf_core = { path = "../core" }
 rtf_sim = { path = "../sim" }
+
+[lints]
+workspace = true

@@ -7,3 +7,6 @@ edition.workspace = true
 rtf_core = { path = "../core" }
 rtf_sim = { path = "../sim" }
 nalgebra.workspace = true
+
+[lints]
+workspace = true

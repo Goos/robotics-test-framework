@@ -8,3 +8,6 @@ rtf_core = { path = "../core" }
 nalgebra.workspace = true
 rand.workspace = true
 rand_pcg.workspace = true
+
+[lints]
+workspace = true
