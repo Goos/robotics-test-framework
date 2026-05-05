@@ -13,5 +13,5 @@ rand_pcg = "0.3"
 rerun = { version = "0.21", default-features = false, features = ["sdk"] }
 
 [workspace.lints.clippy]
-disallowed_types = { level = "deny", priority = 1 }
-disallowed_methods = { level = "deny", priority = 1 }
+disallowed_types = "deny"
+disallowed_methods = "deny"
