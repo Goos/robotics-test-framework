@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = ["core", "sim", "arm", "harness", "viz"]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+nalgebra = "0.33"
+smallvec = "1"
+rand = { version = "0.8", default-features = false }
+rand_pcg = "0.3"
+rerun = { version = "0.21", default-features = false, features = ["sdk"] }
