@@ -1,7 +1,9 @@
 //! rtf_core — populated starting in Phase 1.
 
+pub mod clock;
 pub mod time;
 
+pub use clock::{Clock, FakeClock};
 pub use time::{Time, Duration};
 
 #[cfg(test)]
