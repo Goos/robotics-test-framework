@@ -4,7 +4,6 @@ members = ["core", "sim", "arm", "harness", "viz"]
 
 [workspace.package]
 edition = "2021"
-license = "MIT"
 
 [workspace.dependencies]
 nalgebra = "0.33"
