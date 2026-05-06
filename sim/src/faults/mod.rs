@@ -4,6 +4,8 @@
 
 pub mod delay;
 pub mod drop_messages;
+pub mod stale_data;
 
 pub use delay::Delay;
 pub use drop_messages::DropMessages;
+pub use stale_data::StaleData;
