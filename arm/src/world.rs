@@ -54,9 +54,8 @@ pub struct ArmWorld {
     /// Authoritative sim time. Advanced from Step 3.12 (`tick`).
     #[allow(dead_code)]
     sim_time: Time,
-    /// Shared injectable clock. Handed to controllers via Step 3.7.5
-    /// (`sim_clock_handle`) and advanced in Step 3.12.
-    #[allow(dead_code)]
+    /// Shared injectable clock. Exposed via `sim_clock_handle` (Step 3.7.5);
+    /// advanced in Step 3.12. Phase 9 fault wrappers also clone this Rc.
     sim_clock: Rc<SimClock>,
     /// Monotonic port-id counter. Allocated by Steps 3.8–3.10 attach helpers.
     #[allow(dead_code)]
@@ -93,6 +92,13 @@ impl ArmWorld {
     }
 
     pub fn time(&self) -> Time { self.sim_time }
+
+    /// Shareable handle to the world's `SimClock`. Multiple holders observe
+    /// the same time advancement; callers must respect the design's
+    /// single-threaded contract (no `Send`/`Sync` on `SimClock`).
+    pub fn sim_clock_handle(&self) -> Rc<SimClock> {
+        Rc::clone(&self.sim_clock)
+    }
 }
 
 #[cfg(test)]
@@ -117,5 +123,14 @@ mod tests {
         assert!(world.gravity_enabled);
         assert_eq!(world.arm.state.q.len(), simple_spec().joints.len());
         assert_eq!(world.time(), rtf_core::time::Time::ZERO);
+    }
+
+    #[test]
+    fn sim_clock_handle_returns_sharable_rc() {
+        use std::rc::Rc;
+        let world = ArmWorld::new(Scene::new(0), simple_spec(), true);
+        let h1 = world.sim_clock_handle();
+        let h2 = world.sim_clock_handle();
+        assert!(Rc::ptr_eq(&h1, &h2));
     }
 }
