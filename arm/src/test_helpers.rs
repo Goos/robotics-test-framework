@@ -12,15 +12,21 @@ use crate::{
     world::{ArmWorld, RateHz},
 };
 
-/// Build an `ArmWorld` with `n_joints` z-axis revolute joints, 0.2 m z-axis
+/// Build an `ArmWorld` with `n_joints` z-axis revolute joints, 0.2 m **x-axis**
 /// link offsets, default gripper (proximity 0.02, max_grasp 0.05), gravity
 /// OFF (Phase 5 doesn't model gravity). Seeded `Scene::new(0)` for
 /// determinism.
+///
+/// Link offsets are along the x-axis on purpose: with z-axis Rz joints and
+/// z-axis link offsets, the EE pose is invariant under any joint motion
+/// (Rz fixes z-axis points), which makes ReachPose tests degenerate — the
+/// goal sees zero distance at t=0 and short-circuits before the controller
+/// even runs. Same trap as Step 3.11e's `moving_ee_spec`. Don't "fix" back.
 pub fn build_simple_arm_world(n_joints: usize) -> ArmWorld {
     use core::f32::consts::PI;
     let spec = ArmSpec {
         joints: vec![JointSpec::Revolute { axis: Vector3::z_axis(), limits: (-PI, PI) }; n_joints],
-        link_offsets: vec![Isometry3::translation(0.0, 0.0, 0.2); n_joints],
+        link_offsets: vec![Isometry3::translation(0.2, 0.0, 0.0); n_joints],
         gripper: GripperSpec { proximity_threshold: 0.02, max_grasp_size: 0.05 },
     };
     ArmWorld::new(Scene::new(0), spec, /* gravity */ false)
