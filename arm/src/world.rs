@@ -168,6 +168,36 @@ impl ArmWorld {
         rx
     }
 
+    /// Drain all actuator ports, integrate joint state forward by `dt`, and
+    /// advance the sim clock (design v2 §5.7). v1 covers velocity actuators
+    /// only — gripper consume + grasp transitions land in Step 3.11d, gravity
+    /// in Phase 6.
+    pub fn consume_actuators_and_integrate(&mut self, dt: Duration) {
+        let dt_s = dt.as_nanos() as f32 / 1.0e9_f32;
+
+        // Drain joint-velocity commands; latest wins per port. Collect first
+        // so we don't hold a borrow on `self.actuators_joint_velocity` while
+        // we mutate `self.arm.state.q_dot` in the apply pass. The Vec is
+        // bounded by the number of attached velocity actuators (small).
+        let updates: Vec<(JointId, f32)> = self
+            .actuators_joint_velocity
+            .values_mut()
+            .filter_map(|cons| cons.rx.latest().map(|cmd| (cmd.joint, cmd.q_dot_target)))
+            .collect();
+        for (joint, q_dot_target) in updates {
+            self.arm.state.q_dot[joint.0 as usize] = q_dot_target;
+        }
+
+        // Forward-Euler integrate joint positions: q += q_dot * dt.
+        for i in 0..self.arm.state.q.len() {
+            self.arm.state.q[i] += self.arm.state.q_dot[i] * dt_s;
+        }
+
+        // Advance authoritative sim time and the shared clock together.
+        self.sim_time = self.sim_time + dt;
+        self.sim_clock.advance(dt);
+    }
+
     /// Advance every sensor scheduler by `dt` and publish a fresh reading on
     /// each port that fires this step. Iteration order is `PortId` (BTreeMap),
     /// keeping per-tick output deterministic across runs (design v2 §10.2).
@@ -287,5 +317,15 @@ mod tests {
         world.publish_sensors_for_dt(Duration::from_millis(10));
         let r = rx.latest().expect("ee pose published");
         assert_eq!(r.sampled_at, world.time());
+    }
+
+    #[test]
+    fn velocity_command_advances_joint_position() {
+        use rtf_core::time::Duration;
+        let mut world = ArmWorld::new(Scene::new(0), simple_spec(), true);
+        let tx = world.attach_joint_velocity_actuator(JointId(0));
+        tx.send(JointVelocityCommand { joint: JointId(0), q_dot_target: 1.0 });
+        world.consume_actuators_and_integrate(Duration::from_millis(10));
+        assert!(world.arm.state.q[0] > 0.0);
     }
 }
