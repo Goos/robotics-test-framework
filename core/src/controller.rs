@@ -9,7 +9,7 @@ pub trait Controller {
 }
 
 /// Whether the harness should keep ticking or terminate the scenario.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ControlErrorKind {
     /// Transient — harness logs and keeps ticking.
     Recoverable,
