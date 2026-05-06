@@ -4,6 +4,6 @@ pub mod fk;
 pub mod spec;
 pub mod state;
 
-pub use fk::joint_transform;
+pub use fk::{forward_kinematics, joint_transform};
 pub use spec::{ArmSpec, GripperSpec, JointSpec};
 pub use state::ArmState;
