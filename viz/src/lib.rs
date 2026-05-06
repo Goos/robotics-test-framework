@@ -6,7 +6,13 @@
 
 pub mod file_recorder;
 
+#[cfg(feature = "rerun")]
+pub mod rerun_recorder;
+
 pub use file_recorder::FileRecorder;
+
+#[cfg(feature = "rerun")]
+pub use rerun_recorder::RerunRecorder;
 
 #[cfg(test)]
 mod tests {
