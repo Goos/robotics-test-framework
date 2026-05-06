@@ -22,7 +22,7 @@ pub enum SupportId {
 /// Lifecycle state of a sim object (design v2 §5.2): `Free` (subject to
 /// gravity), `Grasped` (welded to an arm), or `Settled` (resting on a
 /// support, not subject to gravity).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ObjectState {
     Free,
     Grasped { by: ArmRef },
@@ -37,7 +37,10 @@ pub struct Object {
     pub shape: Shape,
     pub mass: f32,
     pub graspable: bool,
+    /// Lifecycle state — see `ObjectState`.
     pub state: ObjectState,
+    /// Linear velocity in world frame (m/s). v1 gravity-fall (design §5.5) writes
+    /// only `lin_vel.z`; lateral components must remain zero.
     pub lin_vel: Vector3<f32>,
 }
 
