@@ -2,6 +2,7 @@
 
 pub mod entity;
 pub mod fixture;
+pub mod gravity;
 pub mod object;
 pub mod primitive;
 pub mod rate_scheduler;
@@ -14,6 +15,7 @@ pub mod visualizable;
 
 pub use entity::EntityId;
 pub use fixture::Fixture;
+pub use gravity::{GRAVITY_M_PER_S2, SETTLE_EPSILON_M};
 pub use object::{ArmRef, Object, ObjectId, ObjectState, SupportId};
 pub use primitive::{Color, Primitive, SceneSnapshot};
 pub use rate_scheduler::RateScheduler;
