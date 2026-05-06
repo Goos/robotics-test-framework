@@ -21,9 +21,6 @@ viz-rerun = ["e2e", "rtf_viz/rerun"]
 rtf_core = { path = "../core" }
 rtf_sim = { path = "../sim" }
 nalgebra.workspace = true
-rand.workspace = true
-rand_pcg.workspace = true
-rand_distr.workspace = true
 
 [dev-dependencies]
 rtf_harness = { path = "../harness" }

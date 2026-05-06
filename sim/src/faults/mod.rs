@@ -5,9 +5,11 @@
 pub mod delay;
 pub mod drop_messages;
 pub mod gaussian_noise;
+pub mod pcg_noise_source;
 pub mod stale_data;
 
 pub use delay::Delay;
 pub use drop_messages::DropMessages;
 pub use gaussian_noise::GaussianNoise;
+pub use pcg_noise_source::PcgNoiseSource;
 pub use stale_data::StaleData;

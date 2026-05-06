@@ -3,6 +3,7 @@
 pub mod clock;
 pub mod controller;
 pub mod goal;
+pub mod noise_source;
 pub mod port;
 pub mod port_id;
 pub mod score;
@@ -13,6 +14,7 @@ pub mod world_view;
 pub use clock::{Clock, FakeClock};
 pub use controller::{ControlError, ControlErrorKind, Controller};
 pub use goal::Goal;
+pub use noise_source::NoiseSource;
 pub use port::{port, PortReader, PortRx, PortTx};
 pub use port_id::PortId;
 pub use score::Score;

@@ -1,16 +1,17 @@
 //! `GaussianNoise<R, T>` — perturbs each pulled reading in-place via the
-//! `Noise` trait. The internal `Pcg64` is seeded explicitly so two runs with
-//! the same seed see byte-identical noise sequences (determinism, design §10).
+//! `Noise` trait, driving the noise from a seeded `PcgNoiseSource`. The
+//! `NoiseSource` abstraction means readings never need to name a concrete
+//! RNG type; only this wrapper imports `rand_pcg`/`rand_distr`.
 
 use core::cell::RefCell;
-use rand::SeedableRng;
-use rand_pcg::Pcg64;
 
-use rtf_core::{port::PortReader, sensor_reading::Noise};
+use rtf_core::{noise_source::NoiseSource, port::PortReader, sensor_reading::Noise};
+
+use crate::faults::pcg_noise_source::PcgNoiseSource;
 
 pub struct GaussianNoise<R: PortReader<T>, T: Clone + Noise> {
     inner: R,
-    rng: RefCell<Pcg64>,
+    source: RefCell<PcgNoiseSource>,
     stddev: f32,
     _phantom: core::marker::PhantomData<T>,
 }
@@ -19,7 +20,7 @@ impl<R: PortReader<T>, T: Clone + Noise> GaussianNoise<R, T> {
     pub fn new(inner: R, stddev: f32, seed: u64) -> Self {
         Self {
             inner,
-            rng: RefCell::new(Pcg64::seed_from_u64(seed)),
+            source: RefCell::new(PcgNoiseSource::from_seed(seed)),
             stddev,
             _phantom: core::marker::PhantomData,
         }
@@ -29,34 +30,39 @@ impl<R: PortReader<T>, T: Clone + Noise> GaussianNoise<R, T> {
 impl<R: PortReader<T>, T: Clone + Noise> PortReader<T> for GaussianNoise<R, T> {
     fn latest(&self) -> Option<T> {
         let mut r = self.inner.latest()?;
-        r.apply_noise(&mut self.rng.borrow_mut(), self.stddev);
+        let mut src = self.source.borrow_mut();
+        let dyn_src: &mut dyn NoiseSource = &mut *src;
+        r.apply_noise(dyn_src, self.stddev);
         Some(r)
     }
 
     fn take(&mut self) -> Option<T> {
         let mut r = self.inner.take()?;
-        r.apply_noise(&mut self.rng.borrow_mut(), self.stddev);
+        let mut src = self.source.borrow_mut();
+        let dyn_src: &mut dyn NoiseSource = &mut *src;
+        r.apply_noise(dyn_src, self.stddev);
         Some(r)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    // Note: unit-tested with arm::JointEncoderReading via an integration-style
-    // test in the arm crate (see arm/src/ports.rs); here we test the wrapper
-    // mechanics in isolation against a tiny stub Noise type so we don't pull
-    // arm into sim's dep graph.
+    // Note: an integration-style test in arm/src/ports.rs covers the real
+    // JointEncoderReading impl. Here we test wrapper mechanics with a stub
+    // Noise type so we don't pull arm into sim's dep graph.
     use super::*;
-    use rtf_core::{port::port, sensor_reading::Noise};
+    use rtf_core::{noise_source::NoiseSource, port::port};
 
     #[derive(Clone)]
     struct Stub {
         x: f32,
     }
     impl Noise for Stub {
-        fn apply_noise(&mut self, _rng: &mut rand_pcg::Pcg64, stddev: f32) {
-            // Deterministic stand-in for a real Gaussian — just so we can
-            // verify the wrapper threads stddev through and mutates the value.
+        fn apply_noise(&mut self, source: &mut dyn NoiseSource, stddev: f32) {
+            // Use the source so we exercise the dyn-dispatch path; throw
+            // away the draw and add a fixed offset so the assertion is
+            // deterministic regardless of which RNG backs the source.
+            let _ = source.standard_normal();
             self.x += stddev;
         }
     }

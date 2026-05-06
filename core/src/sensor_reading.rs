@@ -1,3 +1,4 @@
+use crate::noise_source::NoiseSource;
 use crate::time::Time;
 
 /// Marker trait for sensor reading types.
@@ -15,11 +16,10 @@ pub trait SensorReading {
 /// reading types that can have Gaussian noise applied to their continuous
 /// fields; the `GaussianNoise` fault wrapper calls this on each take/latest.
 ///
-/// `Pcg64` is the framework's seedable RNG; passing it directly (rather than
-/// abstracting over `RngCore`) keeps impls trivial and matches the rest of
-/// the sim's deterministic-RNG story.
+/// Takes a `&mut dyn NoiseSource` so impls never need to name a concrete RNG
+/// type — `rand_pcg`/`rand_distr` stay confined to `rtf_sim::faults`.
 pub trait Noise {
-    fn apply_noise(&mut self, rng: &mut rand_pcg::Pcg64, stddev: f32);
+    fn apply_noise(&mut self, source: &mut dyn NoiseSource, stddev: f32);
 }
 
 #[cfg(test)]

@@ -9,7 +9,6 @@ serde = ["dep:serde"]
 
 [dependencies]
 smallvec.workspace = true
-rand_pcg.workspace = true
 serde = { version = "1", features = ["derive"], optional = true }
 
 [lints]
