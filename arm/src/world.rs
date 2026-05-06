@@ -97,6 +97,13 @@ impl ArmWorld {
 
     pub fn time(&self) -> Time { self.sim_time }
 
+    /// Current end-effector world-frame pose, computed via forward kinematics
+    /// from the arm's spec and joint state. Used by `publish_sensors` and by
+    /// goal/proximity checks (Phase 5+).
+    pub fn ee_pose(&self) -> nalgebra::Isometry3<f32> {
+        crate::fk::forward_kinematics(&self.arm.spec, &self.arm.state.q)
+    }
+
     /// Shareable handle to the world's `SimClock`. Multiple holders observe
     /// the same time advancement; callers must respect the design's
     /// single-threaded contract (no `Send`/`Sync` on `SimClock`).
@@ -164,10 +171,10 @@ impl ArmWorld {
     /// Advance every sensor scheduler by `dt` and publish a fresh reading on
     /// each port that fires this step. Iteration order is `PortId` (BTreeMap),
     /// keeping per-tick output deterministic across runs (design v2 §10.2).
-    /// Joint-encoder branch only in Step 3.11a; EE-pose etc. follow.
     pub fn publish_sensors_for_dt(&mut self, dt: Duration) {
         let dt_ns = dt.as_nanos();
         let sampled_at = self.sim_time;
+
         for pubr in self.sensors_joint_encoder.values_mut() {
             if pubr.scheduler.tick(dt_ns) {
                 let i = pubr.joint.0 as usize;
@@ -177,6 +184,22 @@ impl ArmWorld {
                     q_dot: self.arm.state.q_dot[i],
                     sampled_at,
                 });
+            }
+        }
+
+        // Compute EE pose once per tick (design v2 §5.7 caches FK across all
+        // EE-pose subscribers). FK is borrowed before grabbing the mut iter
+        // because `values_mut` on `sensors_ee_pose` would alias `&self.arm`.
+        let ee_pose = if self.sensors_ee_pose.is_empty() {
+            None
+        } else {
+            Some(self.ee_pose())
+        };
+        if let Some(pose) = ee_pose {
+            for pubr in self.sensors_ee_pose.values_mut() {
+                if pubr.scheduler.tick(dt_ns) {
+                    pubr.tx.send(EePoseReading { pose, sampled_at });
+                }
             }
         }
     }
@@ -254,5 +277,15 @@ mod tests {
         assert_eq!(r.joint, JointId(0));
         assert_eq!(r.q, 0.0);
         assert_eq!(r.q_dot, 0.0);
+    }
+
+    #[test]
+    fn publish_sensors_emits_ee_pose() {
+        use rtf_core::time::Duration;
+        let mut world = ArmWorld::new(Scene::new(0), simple_spec(), true);
+        let rx = world.attach_ee_pose_sensor(RateHz::new(100));
+        world.publish_sensors_for_dt(Duration::from_millis(10));
+        let r = rx.latest().expect("ee pose published");
+        assert_eq!(r.sampled_at, world.time());
     }
 }
