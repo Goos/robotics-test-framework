@@ -252,7 +252,10 @@ impl ArmWorld {
         }
 
         // Closing transition (and nothing currently held): try to grasp the
-        // first graspable Free object within proximity_threshold of the EE.
+        // first graspable, not-already-Grasped object within
+        // proximity_threshold of the EE. Per design v2 §5.4, only `Grasped`
+        // is excluded — `Free` and `Settled` are both eligible (Phase 7's
+        // PickObject starts with the block Settled on a table fixture).
         // Iteration is by ObjectId (BTreeMap) so the choice is deterministic.
         if !was_closed && now_closed && self.arm.state.grasped.is_none() {
             let ee = self.ee_pose();
@@ -260,7 +263,7 @@ impl ArmWorld {
             let arm_id = self.arm.id;
             let to_grasp = self.scene.objects().find_map(|(id, obj)| {
                 if !obj.graspable { return None; }
-                if !matches!(obj.state, rtf_sim::object::ObjectState::Free) { return None; }
+                if matches!(obj.state, rtf_sim::object::ObjectState::Grasped { .. }) { return None; }
                 let dist = (obj.pose.translation.vector - ee.translation.vector).norm();
                 (dist <= threshold).then_some(*id)
             });
