@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use nalgebra::Isometry3;
+use nalgebra::{Isometry3, Vector3};
 use rand::SeedableRng;
 use rand_pcg::Pcg64;
 
@@ -17,7 +17,8 @@ pub struct Scene {
     objects: BTreeMap<ObjectId, Object>,
     fixtures: BTreeMap<u32, Fixture>,
     next_object_id: u32,
-    // Consumed once `add_fixture` lands in a later Phase 2 step.
+    // `add_fixture` (Step 6.2) takes a caller-chosen id; `next_fixture_id`
+    // stays for a future `add_fixture_default` helper that mints sequential ids.
     #[allow(dead_code)]
     next_fixture_id: u32,
     // Per-scene PCG for deterministic sampling; consumed by gravity-fall and
@@ -60,6 +61,30 @@ impl Scene {
     /// `ObjectState` on grasp/release transitions.
     pub fn object_mut(&mut self, id: ObjectId) -> Option<&mut Object> {
         self.objects.get_mut(&id)
+    }
+
+    /// Insert a fixture with a caller-chosen id. Used by scenarios that want
+    /// stable ids (e.g. `with_ground`'s `u32::MAX` ground plane); returns the
+    /// id for chaining.
+    pub fn add_fixture(&mut self, fix: Fixture) -> u32 {
+        let id = fix.id;
+        self.fixtures.insert(id, fix);
+        id
+    }
+
+    /// New scene seeded with `seed`, plus an "infinite" ground-plane fixture
+    /// at `id = u32::MAX` whose top surface sits at z = 0. Used by
+    /// gravity-fall tests and scenarios that want a default support beneath
+    /// every Free object's xy footprint.
+    pub fn with_ground(seed: u64) -> Self {
+        let mut s = Self::new(seed);
+        s.add_fixture(Fixture {
+            id: u32::MAX,
+            pose: Isometry3::translation(0.0, 0.0, -0.5),
+            shape: Shape::Aabb { half_extents: Vector3::new(1000.0, 1000.0, 0.5) },
+            is_support: true,
+        });
+        s
     }
 
     /// Test helper: insert an Object with default pose/shape/mass/graspable, return its id.
