@@ -9,5 +9,9 @@ nalgebra.workspace = true
 rand.workspace = true
 rand_pcg.workspace = true
 
+[features]
+default = []
+controller_events = []
+
 [lints]
 workspace = true

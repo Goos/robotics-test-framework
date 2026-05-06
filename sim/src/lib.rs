@@ -5,6 +5,7 @@ pub mod fixture;
 pub mod object;
 pub mod primitive;
 pub mod rate_scheduler;
+pub mod recorder;
 pub mod scene;
 pub mod shape;
 pub mod sim_clock;
@@ -15,6 +16,9 @@ pub use fixture::Fixture;
 pub use object::{ArmRef, Object, ObjectId, ObjectState, SupportId};
 pub use primitive::{Color, Primitive, SceneSnapshot};
 pub use rate_scheduler::RateScheduler;
+#[cfg(feature = "controller_events")]
+pub use recorder::ControllerEvent;
+pub use recorder::{NullRecorder, Recorder};
 pub use scene::Scene;
 pub use shape::Shape;
 pub use sim_clock::SimClock;
