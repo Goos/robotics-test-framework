@@ -3,5 +3,7 @@
 //! freely. Submodules land one per Phase 9 step.
 
 pub mod delay;
+pub mod drop_messages;
 
 pub use delay::Delay;
+pub use drop_messages::DropMessages;
