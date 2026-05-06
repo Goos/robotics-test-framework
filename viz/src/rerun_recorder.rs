@@ -1,7 +1,7 @@
 //! Rerun recorder — gated on the `rerun` feature. Maps `Primitive` variants
-//! onto rerun archetypes, one entity path per `EntityId`. Steps 8.3a–c cover
-//! `Sphere`, `Box`, and `Capsule`; remaining variants (Line/Label) land in
-//! 8.3d–e.
+//! onto rerun archetypes, one entity path per `EntityId`. Steps 8.3a–d cover
+//! `Sphere`, `Box`, `Capsule`, and `Line`; the remaining `Label` variant
+//! lands in 8.3e.
 
 use rtf_sim::{
     primitive::{Primitive, SceneSnapshot},
@@ -76,6 +76,14 @@ impl Recorder for RerunRecorder {
                         .with_radii([*radius, *radius]),
                     );
                 }
+                Primitive::Line { from, to, color: _ } => {
+                    let from_arr = [from.x, from.y, from.z];
+                    let to_arr = [to.x, to.y, to.z];
+                    let _ = self.stream.log(
+                        path.as_str(),
+                        &rerun::archetypes::LineStrips3D::new([vec![from_arr, to_arr]]),
+                    );
+                }
                 _ => {}
             }
         }
@@ -133,6 +141,23 @@ mod tests {
                     pose: Isometry3::identity(),
                     half_height: 0.1,
                     radius: 0.02,
+                    color: Color::WHITE,
+                },
+            )],
+        });
+    }
+
+    #[test]
+    fn rerun_recorder_records_a_line() {
+        use nalgebra::Point3;
+        let mut rec = RerunRecorder::in_memory("test").unwrap();
+        rec.record(&SceneSnapshot {
+            t: Time::from_nanos(0),
+            items: vec![(
+                EntityId::Object(3),
+                Primitive::Line {
+                    from: Point3::new(0.0, 0.0, 0.0),
+                    to: Point3::new(1.0, 0.0, 0.0),
                     color: Color::WHITE,
                 },
             )],
