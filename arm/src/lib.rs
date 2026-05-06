@@ -1,6 +1,8 @@
 //! rtf_arm — populated starting in Phase 1.
 
 pub mod arm;
+#[cfg(any(test, feature = "examples"))]
+pub mod examples_;
 pub mod fk;
 pub mod goals;
 pub mod ports;

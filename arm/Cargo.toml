@@ -3,6 +3,12 @@ name = "rtf_arm"
 version = "0.1.0"
 edition.workspace = true
 
+[features]
+default = []
+# Opt-in example controllers and test helpers used by Phase 5+ end-to-end tests
+# (gated so they don't bloat default builds or leak into the public API).
+examples = []
+
 [dependencies]
 rtf_core = { path = "../core" }
 rtf_sim = { path = "../sim" }
