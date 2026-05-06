@@ -32,14 +32,17 @@ fn object_grasped_then_released_falls_to_table() {
         is_support: true,
     });
 
-    // Arm geometry: first link goes straight up so the EE sits at z=1.0
-    // (=0.5+0.2+0.2+0.1 with the chained transforms), well above the ground.
-    // The block starts at the EE so the gripper's first close grasps it.
+    // Spec-intended geometry: x-axis link offsets with a small base lift so
+    // the EE sits at (0.6, 0, 0.1) — far enough above the ground that the
+    // block doesn't immediately snap-settle in the first gravity tick (which
+    // would deny the gripper a chance to grasp it as Free). The block starts
+    // at the EE so the first gripper-close grasps it; on release, gravity
+    // pulls it onto the ground at z=0.
     use core::f32::consts::PI;
     let spec = ArmSpec {
         joints: vec![JointSpec::Revolute { axis: Vector3::z_axis(), limits: (-PI, PI) }; 3],
         link_offsets: vec![
-            Isometry3::translation(0.0, 0.0, 1.0),
+            Isometry3::translation(0.2, 0.0, 0.1),
             Isometry3::translation(0.2, 0.0, 0.0),
             Isometry3::translation(0.2, 0.0, 0.0),
         ],
@@ -49,7 +52,7 @@ fn object_grasped_then_released_falls_to_table() {
     let block_id = ObjectId(99);
     scene.insert_object(Object::new(
         block_id,
-        Isometry3::translation(0.4, 0.0, 1.0),
+        Isometry3::translation(0.6, 0.0, 0.1),
         Shape::Sphere { radius: 0.025 },
         0.1,
         true,

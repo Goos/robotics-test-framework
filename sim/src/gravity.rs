@@ -96,10 +96,12 @@ pub fn reevaluate_settled(scene: &mut Scene) {
 /// Per-object processing in `(z ascending, id ascending)` order so that lower
 /// objects settle (or commit) before higher ones consider them as supports.
 /// `f32::total_cmp` handles NaN deterministically. For each Free object: read
-/// pose/vel/shape via `scene.object`; integrate; query `find_support_beneath`;
-/// if the bottom has reached `top_z + SETTLE_EPSILON_M`, snap z to
-/// `top_z + half_height`, zero z-velocity, and transition to
-/// `Settled { on: support_id }`; otherwise commit the integrated state.
+/// pose/vel/shape via `scene.object`; integrate; query `find_support_beneath`
+/// using the *pre-integration* center `cur_z` (so a support the object has
+/// just crossed below in this tick still qualifies); if the bottom has reached
+/// `top_z + SETTLE_EPSILON_M`, snap z to `top_z + half_height`, zero
+/// z-velocity, and transition to `Settled { on: support_id }`; otherwise
+/// commit the integrated state.
 pub fn gravity_step(scene: &mut Scene, dt_ns: i64) {
     let dt_s = dt_ns as f32 / 1.0e9_f32;
 
@@ -127,7 +129,10 @@ pub fn gravity_step(scene: &mut Scene, dt_ns: i64) {
         let new_lin_vel_z = cur_lin_vel_z - GRAVITY_M_PER_S2 * dt_s;
         let new_z = cur_z + new_lin_vel_z * dt_s;
         let bottom_z = new_z - half_height_z;
-        let support = find_support_beneath(scene, xy, new_z, Some(id));
+        // Use cur_z (pre-integration center) as the support search ceiling so
+        // that supports the object has just crossed below in a single tick
+        // are still considered (otherwise object falls past them forever).
+        let support = find_support_beneath(scene, xy, cur_z, Some(id));
         match support {
             Some((support_id, top_z)) if bottom_z <= top_z + SETTLE_EPSILON_M => {
                 let obj = scene.object_mut(id).expect("object must exist");
