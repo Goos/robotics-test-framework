@@ -3,6 +3,10 @@ name = "rtf_viz"
 version = "0.1.0"
 edition.workspace = true
 
+[features]
+default = []
+rerun = ["dep:rerun"]
+
 [dependencies]
 rtf_sim = { path = "../sim" }
 rerun = { workspace = true, optional = true }
