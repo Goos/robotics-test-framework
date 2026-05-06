@@ -6,7 +6,7 @@ use rand_pcg::Pcg64;
 
 use crate::{
     fixture::Fixture,
-    object::{Object, ObjectId},
+    object::{Object, ObjectId, ObjectState, SupportId},
     shape::Shape,
 };
 
@@ -76,6 +76,27 @@ impl Scene {
         let id = fix.id;
         self.fixtures.insert(id, fix);
         id
+    }
+
+    /// Remove a fixture by id; returns it if present (so callers can inspect
+    /// the removed value, e.g. for snapshot diffing). Used by gravity-fall
+    /// `reevaluate_settled` tests where a support disappears mid-run.
+    pub fn remove_fixture(&mut self, id: u32) -> Option<Fixture> {
+        self.fixtures.remove(&id)
+    }
+
+    /// True iff a support with the given id currently exists. For
+    /// `SupportId::Object(id)` the object must also still be Settled (a
+    /// re-Freed object stops being a support). Consumed by
+    /// `gravity::reevaluate_settled` (Step 6.4).
+    pub fn has_support(&self, support: SupportId) -> bool {
+        match support {
+            SupportId::Fixture(id) => self.fixtures.contains_key(&id),
+            SupportId::Object(id) => self
+                .objects
+                .get(&ObjectId(id))
+                .is_some_and(|o| matches!(o.state, ObjectState::Settled { .. })),
+        }
     }
 
     /// New scene seeded with `seed`, plus an "infinite" ground-plane fixture

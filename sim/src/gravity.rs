@@ -63,6 +63,34 @@ fn shape_xy_contains(pose: Isometry3<f32>, shape: &Shape, xy: (f32, f32)) -> boo
     }
 }
 
+/// Re-check every Settled object's support; transition to Free if the support
+/// has vanished (`Scene::has_support` is false) or if the chosen support no
+/// longer matches the highest support beneath the object's xy. Two-pass
+/// (collect ids, then mutate) to dodge the alias borrow. Designed to run
+/// after scene mutations like `Scene::remove_fixture` so the next gravity
+/// step sees correctly classified objects.
+pub fn reevaluate_settled(scene: &mut Scene) {
+    let mut to_free: Vec<ObjectId> = Vec::new();
+    for (id, obj) in scene.objects() {
+        let ObjectState::Settled { on } = obj.state else { continue };
+        if !scene.has_support(on) {
+            to_free.push(*id);
+            continue;
+        }
+        let xy = (obj.pose.translation.x, obj.pose.translation.y);
+        // Re-check: does the chosen support still own our xy column?
+        let support_check = find_support_beneath(scene, xy, obj.pose.translation.z + 1.0, Some(*id));
+        if support_check.is_none_or(|(s, _)| s != on) {
+            to_free.push(*id);
+        }
+    }
+    for id in to_free {
+        if let Some(obj) = scene.object_mut(id) {
+            obj.state = ObjectState::Free;
+        }
+    }
+}
+
 /// Per-tick gravity integration with snap-to-support (design v2 §5.5).
 ///
 /// Per-object processing in `(z ascending, id ascending)` order so that lower
@@ -213,6 +241,32 @@ mod tests_support {
         assert!(matches!(o.state, ObjectState::Settled { .. }));
         let table_top_z = 0.5 + 0.01;
         assert!((o.pose.translation.z - (table_top_z + 0.05)).abs() < 1e-3);
+    }
+
+    #[test]
+    fn settled_object_becomes_free_when_support_disappears() {
+        use crate::object::{Object, ObjectId, ObjectState};
+        use nalgebra::Isometry3;
+        let mut scene = Scene::with_ground(0);
+        let table = scene.add_fixture(Fixture {
+            id: 0,
+            pose: Isometry3::translation(0.0, 0.0, 0.5),
+            shape: Shape::Aabb { half_extents: Vector3::new(0.5, 0.5, 0.01) },
+            is_support: true,
+        });
+        let id = ObjectId(1);
+        scene.insert_object(Object::new(
+            id,
+            Isometry3::translation(0.0, 0.0, 0.51 + 0.05),
+            Shape::Sphere { radius: 0.05 },
+            0.1,
+            true,
+        ));
+        super::gravity_step(&mut scene, 1_000_000);
+        assert!(matches!(scene.object(id).unwrap().state, ObjectState::Settled { .. }));
+        scene.remove_fixture(table);
+        super::reevaluate_settled(&mut scene);
+        assert!(matches!(scene.object(id).unwrap().state, ObjectState::Free));
     }
 
     #[test]
