@@ -181,6 +181,13 @@ impl ArmWorld {
     /// Named `_inner` so the `RunnableWorld::consume_actuators_and_integrate`
     /// trait method can delegate here without recursing into itself.
     pub fn consume_actuators_and_integrate_inner(&mut self, dt: Duration) {
+        // Gravity (design v2 §5.5) — re-classify any settled object whose
+        // support has vanished, then integrate Free objects.
+        if self.gravity_enabled {
+            rtf_sim::gravity::reevaluate_settled(&mut self.scene);
+            rtf_sim::gravity::gravity_step(&mut self.scene, dt.as_nanos());
+        }
+
         let dt_s = dt.as_nanos() as f32 / 1.0e9_f32;
 
         // Drain joint-velocity commands; latest wins per port. Collect first
@@ -506,5 +513,38 @@ mod tests {
         assert_ne!(pose_before.translation.vector, pose_after.translation.vector);
         let ee = world.ee_pose();
         assert!((pose_after.translation.vector - ee.translation.vector).norm() < 1e-4);
+    }
+
+    #[test]
+    fn arm_world_with_gravity_lets_object_fall_onto_table() {
+        use rtf_core::time::Duration;
+        use rtf_sim::fixture::Fixture;
+        use rtf_sim::object::{Object, ObjectId, ObjectState};
+        use rtf_sim::shape::Shape;
+        use nalgebra::{Isometry3, Vector3};
+
+        let mut scene = rtf_sim::scene::Scene::with_ground(0);
+        scene.add_fixture(Fixture {
+            id: 0,
+            pose: Isometry3::translation(0.0, 0.0, 0.5),
+            shape: Shape::Aabb { half_extents: Vector3::new(0.5, 0.5, 0.01) },
+            is_support: true,
+        });
+        let block = ObjectId(1);
+        scene.insert_object(Object::new(
+            block,
+            Isometry3::translation(0.0, 0.0, 1.0),
+            Shape::Sphere { radius: 0.05 },
+            0.1,
+            true,
+        ));
+        let mut world = ArmWorld::new(scene, simple_spec(), /* gravity */ true);
+        for _ in 0..2000 {
+            world.consume_actuators_and_integrate_inner(Duration::from_millis(1));
+        }
+        assert!(matches!(
+            world.scene.object(block).unwrap().state,
+            ObjectState::Settled { .. }
+        ));
     }
 }
