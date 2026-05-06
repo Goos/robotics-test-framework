@@ -9,6 +9,7 @@ use rtf_core::{
     time::Time,
 };
 
+use crate::ik::ik_2r;
 use crate::ports::{
     EePoseReading, GripperCommand, JointEncoderReading, JointId, JointVelocityCommand,
 };
@@ -58,11 +59,10 @@ impl<R: PortReader<JointEncoderReading>> Controller for PdJointController<R> {
     }
 }
 
-/// Open-loop pick-and-place state-machine controller (Phase 7 §7.4a). Drives
-/// the EE toward a block xy with a P-controller on heading (joint 0), closes
-/// the gripper, drives to a bin xy, opens the gripper. Joints 1, 2 are held
-/// still — joint 0 alone suffices to swing the planar chain to any xy
-/// reachable within link-sum radius.
+/// Pick-and-place state-machine controller for a Z-Y-Y arm. Yaws J0 over the
+/// block, descends J1+J2 via 2R IK, closes the gripper, ascends, swings J0
+/// over the bin, and releases. Pre-computes IK targets at construction —
+/// unreachable geometry panics in `new()` (programmer error in fixture).
 pub struct PickPlace<R, P>
 where
     R: PortReader<JointEncoderReading>,
@@ -71,24 +71,34 @@ where
     state: PickPlaceState,
     target_block_xy: (f32, f32),
     target_bin_xy: (f32, f32),
-    /// Joint encoders are accepted in the constructor for parity with
-    /// `StandardArmPorts` and future joint-aware control extensions; v1
-    /// state-machine drives off EE pose alone.
-    #[allow(dead_code)]
     encoder_rxs: Vec<R>,
     ee_pose_rx: P,
     velocity_txs: Vec<PortTx<JointVelocityCommand>>,
     gripper_tx: PortTx<GripperCommand>,
-    proximity_threshold: f32,
+    /// Per-joint convergence threshold (radians). All three joints must be
+    /// within this of their respective targets to advance state.
+    joint_tol: f32,
+    /// IK solutions (J1, J2) for the three keyframe poses.
+    ik_above_block: (f32, f32),
+    ik_at_block: (f32, f32),
+    ik_above_bin: (f32, f32),
     close_hold_ticks: u32,
     open_hold_ticks: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PickPlaceState {
-    Approach,
+    /// J0 swings to align with block xy; J1, J2 driven to 0 (extended).
+    ApproachYaw,
+    /// J1, J2 driven to `ik_at_block` so EE drops onto the block.
+    DescendOverBlock,
+    /// Gripper closes; all joints held still.
     CloseGripper(u32),
-    MoveToBin,
+    /// J1, J2 driven back to `ik_above_block`, lifting the grasped block.
+    AscendWithBlock,
+    /// J0 swings to align with bin xy; J1, J2 driven to `ik_above_bin`.
+    YawToBin,
+    /// Gripper opens; all joints held still.
     OpenGripper(u32),
     Done,
 }
@@ -98,6 +108,11 @@ where
     R: PortReader<JointEncoderReading>,
     P: PortReader<EePoseReading>,
 {
+    /// Construct a PickPlace controller. Pre-computes IK for three keyframe
+    /// EE poses (above_block, at_block, above_bin) where above_* targets sit
+    /// at z=0.85 and at_block sits 0.025 m above the block top. Panics if
+    /// any IK solve fails — the test fixture is supposed to be reachable.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         encoder_rxs: Vec<R>,
         ee_pose_rx: P,
@@ -105,47 +120,86 @@ where
         gripper_tx: PortTx<GripperCommand>,
         target_block_xy: (f32, f32),
         target_bin_xy: (f32, f32),
+        arm_shoulder_z: f32,
+        l1: f32,
+        l2: f32,
     ) -> Self {
+        let block_r = (target_block_xy.0 * target_block_xy.0
+            + target_block_xy.1 * target_block_xy.1).sqrt();
+        let bin_r = (target_bin_xy.0 * target_bin_xy.0
+            + target_bin_xy.1 * target_bin_xy.1).sqrt();
+        // Block top at z=0.55 (block center 0.525 + half-extent 0.025).
+        // Park EE 0.85m up between maneuvers — safely above the bin top
+        // (z=0.6) so the released block can fall into the bin.
+        let block_grasp_z = 0.55_f32;
+        let park_z = 0.85_f32;
+        let ik_at_block = ik_2r(block_r, block_grasp_z - arm_shoulder_z, l1, l2)
+            .expect("at_block target unreachable — check arm geometry vs block xy/z");
+        let ik_above_block = ik_2r(block_r, park_z - arm_shoulder_z, l1, l2)
+            .expect("above_block target unreachable — check arm geometry vs block xy");
+        let ik_above_bin = ik_2r(bin_r, park_z - arm_shoulder_z, l1, l2)
+            .expect("above_bin target unreachable — check arm geometry vs bin xy");
         Self {
-            state: PickPlaceState::Approach,
+            state: PickPlaceState::ApproachYaw,
             target_block_xy,
             target_bin_xy,
             encoder_rxs,
             ee_pose_rx,
             velocity_txs,
             gripper_tx,
-            proximity_threshold: 0.05,
-            close_hold_ticks: 50,
-            open_hold_ticks: 50,
+            joint_tol: 0.02,
+            ik_above_block,
+            ik_at_block,
+            ik_above_bin,
+            close_hold_ticks: 200,
+            open_hold_ticks: 200,
         }
     }
 
     pub fn state(&self) -> PickPlaceState { self.state }
 
-    fn drive_toward_xy(&mut self, ee_xy: (f32, f32), target: (f32, f32)) {
-        // Rotate joint 0 to align the chain heading with the target direction.
-        // Wrap heading error to [-π, π] so the shortest rotation wins.
+    /// Read all joint encoders into a vector; entries default to 0.0 if a
+    /// publisher hasn't fired yet (only relevant in tests).
+    fn joint_qs(&self) -> Vec<f32> {
+        self.encoder_rxs
+            .iter()
+            .map(|rx| rx.latest().map(|r| r.q).unwrap_or(0.0))
+            .collect()
+    }
+
+    /// Yaw-error from current EE xy heading to a target xy heading, wrapped
+    /// to `[-π, π]`. None if EE pose hasn't published yet.
+    fn yaw_error(&self, target: (f32, f32)) -> Option<f32> {
         use core::f32::consts::PI;
+        let r = self.ee_pose_rx.latest()?;
+        let ee_xy = (r.pose.translation.x, r.pose.translation.y);
         let target_heading = target.1.atan2(target.0);
         let ee_heading = ee_xy.1.atan2(ee_xy.0);
         let error = target_heading - ee_heading;
-        let wrapped = ((error + PI).rem_euclid(2.0 * PI)) - PI;
-        let q_dot_target = (wrapped * 4.0).clamp(-1.0, 1.0);
-        self.velocity_txs[0].send(JointVelocityCommand {
-            joint: JointId(0),
-            q_dot_target,
-        });
-        for (i, tx) in self.velocity_txs.iter().enumerate().skip(1) {
-            tx.send(JointVelocityCommand {
-                joint: JointId(i as u32),
-                q_dot_target: 0.0,
-            });
-        }
+        Some(((error + PI).rem_euclid(2.0 * PI)) - PI)
     }
 
-    fn ee_xy(&self) -> Option<(f32, f32)> {
-        let r = self.ee_pose_rx.latest()?;
-        Some((r.pose.translation.x, r.pose.translation.y))
+    /// Send a per-joint velocity command computed via P-control on the
+    /// position error toward `targets`. Joint 0's "target" is interpreted
+    /// as a yaw error (radians, already wrapped); joints 1+ as absolute
+    /// position targets.
+    fn drive_joints(&mut self, j0_yaw_err: f32, j1_target: f32, j2_target: f32) {
+        let qs = self.joint_qs();
+        // J0: position-equivalent error is the yaw_err itself.
+        let q_dot_0 = (j0_yaw_err * 4.0).clamp(-2.0, 2.0);
+        self.velocity_txs[0].send(JointVelocityCommand {
+            joint: JointId(0),
+            q_dot_target: q_dot_0,
+        });
+        for (i, target) in [(1usize, j1_target), (2usize, j2_target)] {
+            if i >= self.velocity_txs.len() { break; }
+            let cur = qs.get(i).copied().unwrap_or(0.0);
+            let q_dot = ((target - cur) * 4.0).clamp(-2.0, 2.0);
+            self.velocity_txs[i].send(JointVelocityCommand {
+                joint: JointId(i as u32),
+                q_dot_target: q_dot,
+            });
+        }
     }
 
     fn halt_joints(&mut self) {
@@ -156,6 +210,14 @@ where
             });
         }
     }
+
+    /// True iff `|q[1] - j1_target| < tol AND |q[2] - j2_target| < tol`.
+    fn pitch_converged(&self, j1_target: f32, j2_target: f32) -> bool {
+        let qs = self.joint_qs();
+        let j1_ok = qs.get(1).is_some_and(|q| (q - j1_target).abs() < self.joint_tol);
+        let j2_ok = qs.get(2).is_some_and(|q| (q - j2_target).abs() < self.joint_tol);
+        j1_ok && j2_ok
+    }
 }
 
 impl<R, P> Controller for PickPlace<R, P>
@@ -164,13 +226,18 @@ where
     P: PortReader<EePoseReading>,
 {
     fn step(&mut self, _t: Time) -> Result<(), ControlError> {
-        let Some(ee_xy) = self.ee_xy() else { return Ok(()); };
+        let Some(yaw_err_block) = self.yaw_error(self.target_block_xy) else { return Ok(()); };
+        let yaw_err_bin = self.yaw_error(self.target_bin_xy).unwrap_or(0.0);
         match self.state {
-            PickPlaceState::Approach => {
-                self.drive_toward_xy(ee_xy, self.target_block_xy);
-                let dx = ee_xy.0 - self.target_block_xy.0;
-                let dy = ee_xy.1 - self.target_block_xy.1;
-                if (dx * dx + dy * dy).sqrt() < self.proximity_threshold {
+            PickPlaceState::ApproachYaw => {
+                self.drive_joints(yaw_err_block, 0.0, 0.0);
+                if yaw_err_block.abs() < self.joint_tol && self.pitch_converged(0.0, 0.0) {
+                    self.state = PickPlaceState::DescendOverBlock;
+                }
+            }
+            PickPlaceState::DescendOverBlock => {
+                self.drive_joints(yaw_err_block, self.ik_at_block.0, self.ik_at_block.1);
+                if self.pitch_converged(self.ik_at_block.0, self.ik_at_block.1) {
                     self.state = PickPlaceState::CloseGripper(0);
                 }
             }
@@ -178,17 +245,24 @@ where
                 self.gripper_tx.send(GripperCommand { close: true });
                 self.halt_joints();
                 self.state = if n >= self.close_hold_ticks {
-                    PickPlaceState::MoveToBin
+                    PickPlaceState::AscendWithBlock
                 } else {
                     PickPlaceState::CloseGripper(n + 1)
                 };
             }
-            PickPlaceState::MoveToBin => {
+            PickPlaceState::AscendWithBlock => {
                 self.gripper_tx.send(GripperCommand { close: true });
-                self.drive_toward_xy(ee_xy, self.target_bin_xy);
-                let dx = ee_xy.0 - self.target_bin_xy.0;
-                let dy = ee_xy.1 - self.target_bin_xy.1;
-                if (dx * dx + dy * dy).sqrt() < self.proximity_threshold {
+                self.drive_joints(yaw_err_block, self.ik_above_block.0, self.ik_above_block.1);
+                if self.pitch_converged(self.ik_above_block.0, self.ik_above_block.1) {
+                    self.state = PickPlaceState::YawToBin;
+                }
+            }
+            PickPlaceState::YawToBin => {
+                self.gripper_tx.send(GripperCommand { close: true });
+                self.drive_joints(yaw_err_bin, self.ik_above_bin.0, self.ik_above_bin.1);
+                if yaw_err_bin.abs() < self.joint_tol
+                    && self.pitch_converged(self.ik_above_bin.0, self.ik_above_bin.1)
+                {
                     self.state = PickPlaceState::OpenGripper(0);
                 }
             }
@@ -232,57 +306,157 @@ mod tests {
 #[cfg(test)]
 mod pick_place_tests {
     use super::*;
-    use rtf_core::port::port;
+    use rtf_core::port::{port, PortRx, PortTx};
 
-    #[allow(clippy::type_complexity)]
-    fn make_controller(
-        ee_xy: (f32, f32),
-    ) -> (
-        PickPlace<rtf_core::port::PortRx<JointEncoderReading>, rtf_core::port::PortRx<EePoseReading>>,
-        rtf_core::port::PortRx<JointVelocityCommand>,
-        rtf_core::port::PortRx<GripperCommand>,
-    ) {
-        let (_enc_tx, enc_rx) = port::<JointEncoderReading>();
+    /// Test rig: 3 encoder pubs, 1 EE pose pub, 3 velocity-cmd subs, 1
+    /// gripper-cmd sub, plus the controller. Block at (0.6, 0), bin at
+    /// (0, 0.6); shoulder z=0.8, l1=l2=0.4 (matches the test fixture).
+    struct Rig {
+        c: PickPlace<PortRx<JointEncoderReading>, PortRx<EePoseReading>>,
+        enc_txs: Vec<PortTx<JointEncoderReading>>,
+        ee_tx: PortTx<EePoseReading>,
+        _vel_rxs: Vec<PortRx<JointVelocityCommand>>,
+        _g_rx: PortRx<GripperCommand>,
+    }
+
+    fn make_rig() -> Rig {
+        let mut enc_rxs = Vec::new();
+        let mut enc_txs = Vec::new();
+        for _ in 0..3 {
+            let (tx, rx) = port::<JointEncoderReading>();
+            enc_rxs.push(rx);
+            enc_txs.push(tx);
+        }
         let (ee_tx, ee_rx) = port::<EePoseReading>();
-        let (vel_tx, vel_rx) = port::<JointVelocityCommand>();
+        let mut vel_txs = Vec::new();
+        let mut vel_rxs = Vec::new();
+        for _ in 0..3 {
+            let (tx, rx) = port::<JointVelocityCommand>();
+            vel_txs.push(tx);
+            vel_rxs.push(rx);
+        }
         let (g_tx, g_rx) = port::<GripperCommand>();
-        ee_tx.send(EePoseReading {
-            pose: nalgebra::Isometry3::translation(ee_xy.0, ee_xy.1, 0.0),
+        let c = PickPlace::new(
+            enc_rxs, ee_rx, vel_txs, g_tx,
+            (0.6, 0.0), (0.0, 0.6),
+            0.8, 0.4, 0.4,
+        );
+        Rig { c, enc_txs, ee_tx, _vel_rxs: vel_rxs, _g_rx: g_rx }
+    }
+
+    fn publish_encoders(rig: &Rig, qs: [f32; 3]) {
+        for (i, q) in qs.iter().enumerate() {
+            rig.enc_txs[i].send(JointEncoderReading {
+                joint: JointId(i as u32),
+                q: *q,
+                q_dot: 0.0,
+                sampled_at: Time::ZERO,
+            });
+        }
+    }
+
+    fn publish_ee_xy(rig: &Rig, xy: (f32, f32)) {
+        rig.ee_tx.send(EePoseReading {
+            pose: nalgebra::Isometry3::translation(xy.0, xy.1, 0.85),
             sampled_at: Time::ZERO,
         });
-        let c = PickPlace::new(
-            vec![enc_rx],
-            ee_rx,
-            vec![vel_tx],
-            g_tx,
-            (0.5, 0.0),
-            (0.0, 0.5),
-        );
-        (c, vel_rx, g_rx)
     }
 
     #[test]
-    fn approach_transitions_to_close_when_within_threshold() {
-        let (mut c, _vel_rx, _g_rx) = make_controller((0.5, 0.0));
-        c.step(Time::ZERO).unwrap();
-        assert!(matches!(c.state(), PickPlaceState::CloseGripper(_)));
+    fn approach_yaw_advances_when_yaw_and_pitches_converged() {
+        let mut rig = make_rig();
+        // EE already aligned with block xy=(0.6, 0): yaw target = atan2(0, 0.6) = 0.
+        // Place EE on +x to make ee_heading = 0 too.
+        publish_ee_xy(&rig, (0.6, 0.0));
+        publish_encoders(&rig, [0.0, 0.0, 0.0]);
+        rig.c.step(Time::ZERO).unwrap();
+        assert!(matches!(rig.c.state(), PickPlaceState::DescendOverBlock));
     }
 
     #[test]
-    fn approach_stays_when_outside_threshold() {
-        let (mut c, _vel_rx, _g_rx) = make_controller((1.0, 0.0));
-        c.step(Time::ZERO).unwrap();
-        assert!(matches!(c.state(), PickPlaceState::Approach));
+    fn approach_yaw_stays_when_yaw_off() {
+        let mut rig = make_rig();
+        // Force a yaw misalignment: EE heading is +y but block is at +x.
+        publish_ee_xy(&rig, (0.0, 0.6));
+        publish_encoders(&rig, [0.0, 0.0, 0.0]);
+        rig.c.step(Time::ZERO).unwrap();
+        assert!(matches!(rig.c.state(), PickPlaceState::ApproachYaw));
     }
 
     #[test]
-    fn close_gripper_transitions_to_move_after_hold_ticks() {
-        let (mut c, _vel_rx, _g_rx) = make_controller((0.5, 0.0));
-        c.step(Time::ZERO).unwrap();
-        assert!(matches!(c.state(), PickPlaceState::CloseGripper(_)));
-        for _ in 0..60 {
-            c.step(Time::ZERO).unwrap();
+    fn descend_over_block_transitions_to_close_when_pitches_converged() {
+        let mut rig = make_rig();
+        // Force state to DescendOverBlock by publishing aligned EE first.
+        publish_ee_xy(&rig, (0.6, 0.0));
+        publish_encoders(&rig, [0.0, 0.0, 0.0]);
+        rig.c.step(Time::ZERO).unwrap();
+        assert!(matches!(rig.c.state(), PickPlaceState::DescendOverBlock));
+        // Now report the IK target for at_block on the encoders.
+        let (j1, j2) = rig.c.ik_at_block;
+        publish_encoders(&rig, [0.0, j1, j2]);
+        rig.c.step(Time::ZERO).unwrap();
+        assert!(matches!(rig.c.state(), PickPlaceState::CloseGripper(_)));
+    }
+
+    #[test]
+    fn close_gripper_transitions_to_ascend_after_hold_ticks() {
+        let mut rig = make_rig();
+        publish_ee_xy(&rig, (0.6, 0.0));
+        publish_encoders(&rig, [0.0, 0.0, 0.0]);
+        rig.c.step(Time::ZERO).unwrap();
+        let (j1, j2) = rig.c.ik_at_block;
+        publish_encoders(&rig, [0.0, j1, j2]);
+        rig.c.step(Time::ZERO).unwrap();
+        assert!(matches!(rig.c.state(), PickPlaceState::CloseGripper(_)));
+        for _ in 0..210 {
+            rig.c.step(Time::ZERO).unwrap();
         }
-        assert!(matches!(c.state(), PickPlaceState::MoveToBin));
+        assert!(matches!(rig.c.state(), PickPlaceState::AscendWithBlock));
+    }
+
+    #[test]
+    fn ascend_transitions_to_yaw_to_bin_when_pitches_converged() {
+        let mut rig = make_rig();
+        // Drive through Approach → Descend → Close → Ascend.
+        publish_ee_xy(&rig, (0.6, 0.0));
+        publish_encoders(&rig, [0.0, 0.0, 0.0]);
+        rig.c.step(Time::ZERO).unwrap();
+        let (j1_at, j2_at) = rig.c.ik_at_block;
+        publish_encoders(&rig, [0.0, j1_at, j2_at]);
+        rig.c.step(Time::ZERO).unwrap();
+        for _ in 0..210 {
+            rig.c.step(Time::ZERO).unwrap();
+        }
+        assert!(matches!(rig.c.state(), PickPlaceState::AscendWithBlock));
+        // Now report converged-up encoders.
+        let (j1_up, j2_up) = rig.c.ik_above_block;
+        publish_encoders(&rig, [0.0, j1_up, j2_up]);
+        rig.c.step(Time::ZERO).unwrap();
+        assert!(matches!(rig.c.state(), PickPlaceState::YawToBin));
+    }
+
+    #[test]
+    fn yaw_to_bin_transitions_to_open_when_yaw_and_pitches_converged() {
+        let mut rig = make_rig();
+        // Drive to YawToBin via the chain.
+        publish_ee_xy(&rig, (0.6, 0.0));
+        publish_encoders(&rig, [0.0, 0.0, 0.0]);
+        rig.c.step(Time::ZERO).unwrap();
+        let (j1_at, j2_at) = rig.c.ik_at_block;
+        publish_encoders(&rig, [0.0, j1_at, j2_at]);
+        rig.c.step(Time::ZERO).unwrap();
+        for _ in 0..210 {
+            rig.c.step(Time::ZERO).unwrap();
+        }
+        let (j1_up, j2_up) = rig.c.ik_above_block;
+        publish_encoders(&rig, [0.0, j1_up, j2_up]);
+        rig.c.step(Time::ZERO).unwrap();
+        assert!(matches!(rig.c.state(), PickPlaceState::YawToBin));
+        // EE now reports xy=(0, 0.6) — bin yaw target. Encoders at above_bin IK.
+        publish_ee_xy(&rig, (0.0, 0.6));
+        let (j1_bin, j2_bin) = rig.c.ik_above_bin;
+        publish_encoders(&rig, [core::f32::consts::FRAC_PI_2, j1_bin, j2_bin]);
+        rig.c.step(Time::ZERO).unwrap();
+        assert!(matches!(rig.c.state(), PickPlaceState::OpenGripper(_)));
     }
 }

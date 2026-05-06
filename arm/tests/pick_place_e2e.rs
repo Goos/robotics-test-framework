@@ -38,6 +38,9 @@ fn state_machine_picks_block_and_drops_in_bin() {
         ports.gripper_tx,
         /* target_block_xy */ (0.6, 0.0),
         /* target_bin_xy */ (0.0, 0.6),
+        /* arm_shoulder_z */ 0.8,
+        /* l1 */ 0.4,
+        /* l2 */ 0.4,
     );
     let goal = PlaceInBin::new(block, bin);
 
@@ -78,6 +81,7 @@ fn state_machine_picks_block_and_drops_in_bin_with_rerun() {
         ports.gripper_tx,
         (0.6, 0.0),
         (0.0, 0.6),
+        0.8, 0.4, 0.4,
     );
     let goal = PlaceInBin::new(block, bin);
 
@@ -116,6 +120,7 @@ fn state_machine_picks_block_and_drops_in_bin_save_rrd() {
         ports.gripper_tx,
         (0.6, 0.0),
         (0.0, 0.6),
+        0.8, 0.4, 0.4,
     );
     let goal = PlaceInBin::new(block, bin);
 

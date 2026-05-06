@@ -46,7 +46,9 @@ pub fn build_simple_arm_world(n_joints: usize) -> ArmWorld {
 /// Build the canonical pick-and-place world used by Phase 7 sample tasks:
 /// ground + a table fixture (id 0) + a bin fixture ([`BIN_FIXTURE_ID`]) + a
 /// graspable block ([`BLOCK_OBJECT_ID`]) pre-Settled on the table top, plus
-/// a 3-joint planar arm reaching from the origin. Gravity is ON.
+/// a Z-Y-Y arm with a 0.8 m pedestal and two 0.4 m links (total reach 0.8 m
+/// from the shoulder). Gravity is ON. Block xy=(0.6, 0) and bin xy=(0, 0.6)
+/// are both within IK-reach of the shoulder at (0, 0, 0.8).
 pub fn build_pick_and_place_world() -> ArmWorld {
     use core::f32::consts::PI;
     let mut scene = Scene::with_ground(0);
@@ -65,14 +67,6 @@ pub fn build_pick_and_place_world() -> ArmWorld {
         is_support: true,
     });
 
-    // Block xy=(0.6, 0) and bin xy=(0, 0.6) sit on the radius-0.6 circle
-    // traced by the EE under joint-0 rotation (the chain is held straight by
-    // the controller — see PickPlace::drive_toward_xy). The lifted first
-    // link puts the EE at z=0.7, which is above the bin top (z=0.6) so a
-    // released block has a chance to settle onto the bin (gravity_step's
-    // support search needs cur_z > support top_z to consider the support).
-    // Gripper proximity_threshold of 0.2 m bridges the EE-to-block z-gap on
-    // pickup (EE z=0.7, block z=0.525 → 0.175 m apart).
     scene.insert_object(Object {
         id: BLOCK_OBJECT_ID,
         pose: Isometry3::translation(0.6, 0.0, 0.525),
@@ -83,14 +77,23 @@ pub fn build_pick_and_place_world() -> ArmWorld {
         lin_vel: Vector3::zeros(),
     });
 
+    // Z-Y-Y arm: J0 yaws the chain in xy, J1+J2 are pitch joints that
+    // descend/ascend the EE in the radial-z plane. Pedestal lifts the
+    // shoulder to z=0.8; two equal 0.4 m links give a reach circle of radius
+    // 0.8 m around the shoulder. Block (~0.66 m from shoulder) and bin
+    // (~0.65 m from shoulder) are both well within reach.
     let spec = ArmSpec {
-        joints: vec![JointSpec::Revolute { axis: Vector3::z_axis(), limits: (-PI, PI) }; 3],
-        link_offsets: vec![
-            Isometry3::translation(0.2, 0.0, 0.7),
-            Isometry3::translation(0.2, 0.0, 0.0),
-            Isometry3::translation(0.2, 0.0, 0.0),
+        joints: vec![
+            JointSpec::Revolute { axis: Vector3::z_axis(), limits: (-PI, PI) }, // J0 yaw
+            JointSpec::Revolute { axis: Vector3::y_axis(), limits: (-PI, PI) }, // J1 shoulder pitch
+            JointSpec::Revolute { axis: Vector3::y_axis(), limits: (-PI, PI) }, // J2 elbow pitch
         ],
-        gripper: GripperSpec { proximity_threshold: 0.2, max_grasp_size: 0.1 },
+        link_offsets: vec![
+            Isometry3::translation(0.0, 0.0, 0.8), // pedestal — invariant under J0 yaw
+            Isometry3::translation(0.4, 0.0, 0.0), // upper arm
+            Isometry3::translation(0.4, 0.0, 0.0), // forearm
+        ],
+        gripper: GripperSpec { proximity_threshold: 0.05, max_grasp_size: 0.1 },
     };
 
     ArmWorld::new(scene, spec, /* gravity */ true)
