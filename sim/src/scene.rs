@@ -45,6 +45,23 @@ impl Scene {
         self.fixtures.iter()
     }
 
+    /// Insert an Object with a caller-chosen id (used by scenarios and tests
+    /// that want stable ids). Overwrites any existing object with the same id.
+    pub fn insert_object(&mut self, obj: Object) {
+        self.objects.insert(obj.id, obj);
+    }
+
+    /// Look up an object by id (immutable).
+    pub fn object(&self, id: ObjectId) -> Option<&Object> {
+        self.objects.get(&id)
+    }
+
+    /// Look up an object by id (mutable). Used by the arm world to flip
+    /// `ObjectState` on grasp/release transitions.
+    pub fn object_mut(&mut self, id: ObjectId) -> Option<&mut Object> {
+        self.objects.get_mut(&id)
+    }
+
     /// Test helper: insert an Object with default pose/shape/mass/graspable, return its id.
     pub fn add_object_default(&mut self) -> ObjectId {
         let id = ObjectId(self.next_object_id);
@@ -77,5 +94,19 @@ mod tests {
         let _ = s.add_object_default();
         let ids: Vec<_> = s.objects().map(|(_, o)| o.id).collect();
         assert!(ids.windows(2).all(|w| w[0].0 < w[1].0));
+    }
+
+    #[test]
+    fn insert_then_lookup_roundtrips() {
+        use crate::object::Object;
+        use crate::shape::Shape;
+        use nalgebra::Isometry3;
+        let mut s = Scene::new(0);
+        let id = ObjectId(42);
+        let pose = Isometry3::translation(1.0, 0.0, 0.0);
+        s.insert_object(Object::new(id, pose, Shape::Sphere { radius: 0.05 }, 0.1, true));
+        assert!(s.object(id).is_some());
+        s.object_mut(id).unwrap().mass = 0.2;
+        assert_eq!(s.object(id).unwrap().mass, 0.2);
     }
 }

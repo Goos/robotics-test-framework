@@ -169,8 +169,8 @@ impl ArmWorld {
     }
 
     /// Drain all actuator ports, integrate joint state forward by `dt`, and
-    /// advance the sim clock (design v2 §5.7). v1 covers velocity actuators
-    /// only — gripper consume + grasp transitions land in Step 3.11d, gravity
+    /// advance the sim clock (design v2 §5.7). Velocity + gripper as of
+    /// Step 3.11d; grasped-object pose tracking lands in Step 3.11e; gravity
     /// in Phase 6.
     pub fn consume_actuators_and_integrate(&mut self, dt: Duration) {
         let dt_s = dt.as_nanos() as f32 / 1.0e9_f32;
@@ -193,9 +193,61 @@ impl ArmWorld {
             self.arm.state.q[i] += self.arm.state.q_dot[i] * dt_s;
         }
 
+        // Drain gripper command; latest across all ports wins. Collected
+        // before mutating arm/scene state for the same alias reason.
+        let gripper_cmd: Option<GripperCommand> = self
+            .actuators_gripper
+            .values_mut()
+            .filter_map(|cons| cons.rx.latest())
+            .last();
+
+        if let Some(cmd) = gripper_cmd {
+            self.apply_gripper_command(cmd);
+        }
+
         // Advance authoritative sim time and the shared clock together.
         self.sim_time = self.sim_time + dt;
         self.sim_clock.advance(dt);
+    }
+
+    /// Apply a single gripper command — flip `gripper_closed`, then handle the
+    /// open→release and closed→try-grasp transitions per design v2 §5.4.
+    fn apply_gripper_command(&mut self, cmd: GripperCommand) {
+        let was_closed = self.arm.state.gripper_closed;
+        let now_closed = cmd.close;
+        self.arm.state.gripper_closed = now_closed;
+
+        // Opening transition: release any held object back to Free.
+        if was_closed && !now_closed {
+            if let Some(grasped_id) = self.arm.state.grasped.take() {
+                if let Some(obj) = self.scene.object_mut(grasped_id) {
+                    obj.state = rtf_sim::object::ObjectState::Free;
+                }
+            }
+        }
+
+        // Closing transition (and nothing currently held): try to grasp the
+        // first graspable Free object within proximity_threshold of the EE.
+        // Iteration is by ObjectId (BTreeMap) so the choice is deterministic.
+        if !was_closed && now_closed && self.arm.state.grasped.is_none() {
+            let ee = self.ee_pose();
+            let threshold = self.arm.spec.gripper.proximity_threshold;
+            let arm_id = self.arm.id;
+            let to_grasp = self.scene.objects().find_map(|(id, obj)| {
+                if !obj.graspable { return None; }
+                if !matches!(obj.state, rtf_sim::object::ObjectState::Free) { return None; }
+                let dist = (obj.pose.translation.vector - ee.translation.vector).norm();
+                (dist <= threshold).then_some(*id)
+            });
+            if let Some(id) = to_grasp {
+                self.arm.state.grasped = Some(id);
+                if let Some(obj) = self.scene.object_mut(id) {
+                    obj.state = rtf_sim::object::ObjectState::Grasped {
+                        by: rtf_sim::object::ArmRef(arm_id),
+                    };
+                }
+            }
+        }
     }
 
     /// Advance every sensor scheduler by `dt` and publish a fresh reading on
@@ -327,5 +379,29 @@ mod tests {
         tx.send(JointVelocityCommand { joint: JointId(0), q_dot_target: 1.0 });
         world.consume_actuators_and_integrate(Duration::from_millis(10));
         assert!(world.arm.state.q[0] > 0.0);
+    }
+
+    #[test]
+    fn closing_gripper_near_graspable_object_attaches_it() {
+        use rtf_core::time::Duration;
+        use rtf_sim::object::{Object, ObjectId, ObjectState};
+        use rtf_sim::shape::Shape;
+
+        let mut world = ArmWorld::new(Scene::new(0), simple_spec(), true);
+        let ee = world.ee_pose();
+        let block_id = ObjectId(42);
+        world.scene.insert_object(Object::new(
+            block_id, ee, Shape::Sphere { radius: 0.01 }, 0.1, /* graspable */ true,
+        ));
+
+        let g_tx = world.attach_gripper_actuator();
+        g_tx.send(GripperCommand { close: true });
+        world.consume_actuators_and_integrate(Duration::from_millis(1));
+
+        assert_eq!(world.arm.state.grasped, Some(block_id));
+        assert!(matches!(
+            world.scene.object(block_id).unwrap().state,
+            ObjectState::Grasped { .. }
+        ));
     }
 }
