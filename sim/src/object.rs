@@ -1,6 +1,11 @@
 use nalgebra::{Isometry3, Vector3};
 
-use crate::shape::Shape;
+use crate::{
+    entity::EntityId,
+    primitive::{Color, Primitive},
+    shape::Shape,
+    visualizable::Visualizable,
+};
 
 /// Stable identifier for a movable simulation object (design v2 §5.2).
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -53,8 +58,6 @@ impl Object {
         }
     }
 }
-
-use crate::{entity::EntityId, primitive::{Color, Primitive}, visualizable::Visualizable};
 
 impl Visualizable for Object {
     fn append_primitives(&self, out: &mut Vec<(EntityId, Primitive)>) {

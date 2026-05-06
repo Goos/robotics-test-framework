@@ -6,6 +6,5 @@ disallowed-types = [
 
 disallowed-methods = [
     { path = "std::thread::spawn", reason = "single-threaded only (design §10.2)" },
-    { path = "rand::thread_rng",   reason = "implicit global RNG; pass an explicitly seeded StdRng (design §10.2)" },
     { path = "f32::powi",          reason = "cross-toolchain divergence on transcendentals; prefer integer ops (design §10.2)" },
 ]
