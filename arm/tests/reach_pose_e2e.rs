@@ -30,8 +30,19 @@ fn pd_reaches_target_pose_within_2_seconds() {
         .with_seed(42);
 
     let res = run(world, controller, goal, cfg);
+    eprintln!(
+        "e2e: terminated_by={:?}, final_time_ns={}, score={}",
+        res.terminated_by, res.final_time.as_nanos(), res.score.value,
+    );
     assert!(
         matches!(res.terminated_by, Termination::GoalComplete),
         "did not converge in time; final score = {}", res.score.value
+    );
+    // Sanity check: PD must actually have run for measurable sim time.
+    // (Catches degenerate-geometry traps where t=0 already satisfies the goal.)
+    assert!(
+        res.final_time > rtf_core::time::Time::from_millis(1),
+        "suspicious: GoalComplete fired at t={:?} — likely degenerate test geometry",
+        res.final_time
     );
 }
