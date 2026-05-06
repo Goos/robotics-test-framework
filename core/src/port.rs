@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use core::cell::RefCell;
 use std::rc::Rc;
 
 /// Read side of a single-slot LatestWins port. Implemented by the concrete
@@ -9,8 +9,10 @@ pub trait PortReader<T> {
     fn take(&mut self) -> Option<T>;
 }
 
-/// Producer end of a `port::<T>()`. `Clone`-able by design — the producer side
-/// can be shared across the producer subsystem if needed.
+/// Producer end of a `port::<T>()`. `Clone`-able by design — many-producer,
+/// single-consumer; cloning bumps the inner `Rc` refcount and does not require
+/// `T: Clone`.
+#[derive(Clone)]
 pub struct PortTx<T> {
     slot: Rc<RefCell<Option<T>>>,
 }
@@ -32,6 +34,7 @@ pub fn port<T: Clone + 'static>() -> (PortTx<T>, PortRx<T>) {
 }
 
 impl<T> PortTx<T> {
+    /// Overwrites any previously-sent value (LatestWins semantics).
     pub fn send(&self, v: T) {
         *self.slot.borrow_mut() = Some(v);
     }
@@ -89,5 +92,10 @@ mod tests {
         tx.send(42);
         fn pull<R: PortReader<i32>>(r: &mut R) -> Option<i32> { r.take() }
         assert_eq!(pull(&mut rx), Some(42));
+
+        // Object-safety regression guard: PortReader<T> must stay dyn-compatible
+        // — Phase 9 fault wrappers depend on it. Adding a generic method to
+        // PortReader later would silently break this line.
+        let _: Box<dyn PortReader<i32>> = Box::new(port::<i32>().1);
     }
 }
