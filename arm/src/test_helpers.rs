@@ -60,14 +60,22 @@ pub fn build_pick_and_place_world() -> ArmWorld {
 
     scene.add_fixture(Fixture {
         id: BIN_FIXTURE_ID,
-        pose: Isometry3::translation(0.0, 0.5, 0.55),
+        pose: Isometry3::translation(0.0, 0.6, 0.55),
         shape: Shape::Aabb { half_extents: Vector3::new(0.1, 0.1, 0.05) },
         is_support: true,
     });
 
+    // Block xy=(0.6, 0) and bin xy=(0, 0.6) sit on the radius-0.6 circle
+    // traced by the EE under joint-0 rotation (the chain is held straight by
+    // the controller — see PickPlace::drive_toward_xy). The lifted first
+    // link puts the EE at z=0.7, which is above the bin top (z=0.6) so a
+    // released block has a chance to settle onto the bin (gravity_step's
+    // support search needs cur_z > support top_z to consider the support).
+    // Gripper proximity_threshold of 0.2 m bridges the EE-to-block z-gap on
+    // pickup (EE z=0.7, block z=0.525 → 0.175 m apart).
     scene.insert_object(Object {
         id: BLOCK_OBJECT_ID,
-        pose: Isometry3::translation(0.5, 0.0, 0.525),
+        pose: Isometry3::translation(0.6, 0.0, 0.525),
         shape: Shape::Aabb { half_extents: Vector3::new(0.025, 0.025, 0.025) },
         mass: 0.1,
         graspable: true,
@@ -77,8 +85,12 @@ pub fn build_pick_and_place_world() -> ArmWorld {
 
     let spec = ArmSpec {
         joints: vec![JointSpec::Revolute { axis: Vector3::z_axis(), limits: (-PI, PI) }; 3],
-        link_offsets: vec![Isometry3::translation(0.2, 0.0, 0.0); 3],
-        gripper: GripperSpec { proximity_threshold: 0.1, max_grasp_size: 0.1 },
+        link_offsets: vec![
+            Isometry3::translation(0.2, 0.0, 0.7),
+            Isometry3::translation(0.2, 0.0, 0.0),
+            Isometry3::translation(0.2, 0.0, 0.0),
+        ],
+        gripper: GripperSpec { proximity_threshold: 0.2, max_grasp_size: 0.1 },
     };
 
     ArmWorld::new(scene, spec, /* gravity */ true)
