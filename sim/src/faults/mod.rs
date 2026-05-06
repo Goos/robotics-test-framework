@@ -4,8 +4,10 @@
 
 pub mod delay;
 pub mod drop_messages;
+pub mod gaussian_noise;
 pub mod stale_data;
 
 pub use delay::Delay;
 pub use drop_messages::DropMessages;
+pub use gaussian_noise::GaussianNoise;
 pub use stale_data::StaleData;

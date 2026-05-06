@@ -11,6 +11,17 @@ pub trait SensorReading {
     fn sampled_at(&self) -> Time;
 }
 
+/// In-place perturbation of sensor readings (design v2 §13). Implemented by
+/// reading types that can have Gaussian noise applied to their continuous
+/// fields; the `GaussianNoise` fault wrapper calls this on each take/latest.
+///
+/// `Pcg64` is the framework's seedable RNG; passing it directly (rather than
+/// abstracting over `RngCore`) keeps impls trivial and matches the rest of
+/// the sim's deterministic-RNG story.
+pub trait Noise {
+    fn apply_noise(&mut self, rng: &mut rand_pcg::Pcg64, stddev: f32);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

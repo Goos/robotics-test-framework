@@ -10,6 +10,7 @@ nalgebra = "0.33"
 smallvec = "1"
 rand = { version = "0.8", default-features = false }
 rand_pcg = "0.3"
+rand_distr = { version = "0.4", default-features = false }
 rerun = { version = "0.21", default-features = false, features = ["sdk"] }
 
 [workspace.lints.clippy]

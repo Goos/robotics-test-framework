@@ -16,7 +16,7 @@ pub use goal::Goal;
 pub use port::{port, PortReader, PortRx, PortTx};
 pub use port_id::PortId;
 pub use score::Score;
-pub use sensor_reading::SensorReading;
+pub use sensor_reading::{Noise, SensorReading};
 pub use time::{Time, Duration};
 pub use world_view::WorldView;
 
