@@ -15,6 +15,15 @@ use crate::ports::{
 use crate::spec::ArmSpec;
 use crate::state::ArmState;
 
+/// Sample rate (Hz) for a sensor port. Newtype to keep call-sites
+/// self-documenting and to allow attach helpers to compose with `RateScheduler`.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct RateHz(pub u32);
+
+impl RateHz {
+    pub fn new(hz: u32) -> Self { RateHz(hz) }
+}
+
 /// Per-joint encoder publisher: the channel sender, the joint it samples,
 /// and the rate-scheduler that decides when to push a fresh reading.
 /// Consumed in Step 3.11a (`publish_sensors` joint-encoder branch).
@@ -58,10 +67,8 @@ pub struct ArmWorld {
     /// advanced in Step 3.12. Phase 9 fault wrappers also clone this Rc.
     sim_clock: Rc<SimClock>,
     /// Monotonic port-id counter. Allocated by Steps 3.8–3.10 attach helpers.
-    #[allow(dead_code)]
     next_port_id: u32,
-    /// Filled by Step 3.8 (`attach_joint_encoder_sensor`); drained in Step 3.11a.
-    #[allow(dead_code)]
+    /// Filled by `attach_joint_encoder_sensor` (Step 3.8); drained in Step 3.11a.
     pub(crate) sensors_joint_encoder: BTreeMap<PortId, EncoderPublisher>,
     /// Filled by Step 3.10 (`attach_ee_pose_sensor`); drained in Step 3.11b.
     #[allow(dead_code)]
@@ -99,6 +106,25 @@ impl ArmWorld {
     pub fn sim_clock_handle(&self) -> Rc<SimClock> {
         Rc::clone(&self.sim_clock)
     }
+
+    /// Register a joint-encoder sensor on `joint` publishing at `rate` Hz.
+    /// Returns the receiver end of a fresh single-consumer port; the world
+    /// retains the sender + scheduler and pushes readings during `publish_sensors`.
+    pub fn attach_joint_encoder_sensor(
+        &mut self,
+        joint: JointId,
+        rate: RateHz,
+    ) -> PortRx<JointEncoderReading> {
+        let (tx, rx) = rtf_core::port::port::<JointEncoderReading>();
+        let port_id = PortId(self.next_port_id);
+        self.next_port_id += 1;
+        self.sensors_joint_encoder.insert(port_id, EncoderPublisher {
+            joint,
+            tx,
+            scheduler: RateScheduler::new_hz(rate.0),
+        });
+        rx
+    }
 }
 
 #[cfg(test)]
@@ -132,5 +158,13 @@ mod tests {
         let h1 = world.sim_clock_handle();
         let h2 = world.sim_clock_handle();
         assert!(Rc::ptr_eq(&h1, &h2));
+    }
+
+    #[test]
+    fn attaching_two_encoders_yields_distinct_port_ids() {
+        let mut world = ArmWorld::new(Scene::new(0), simple_spec(), true);
+        let _rx_a = world.attach_joint_encoder_sensor(JointId(0), RateHz::new(1000));
+        let _rx_b = world.attach_joint_encoder_sensor(JointId(1), RateHz::new(1000));
+        assert_eq!(world.sensors_joint_encoder.len(), 2);
     }
 }

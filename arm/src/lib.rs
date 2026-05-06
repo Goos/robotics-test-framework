@@ -14,4 +14,4 @@ pub use ports::{
 };
 pub use spec::{ArmSpec, GripperSpec, JointSpec};
 pub use state::ArmState;
-pub use world::ArmWorld;
+pub use world::{ArmWorld, RateHz};
