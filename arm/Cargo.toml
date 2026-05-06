@@ -8,11 +8,18 @@ default = []
 # Opt-in example controllers and test helpers used by Phase 5+ end-to-end tests
 # (gated so they don't bloat default builds or leak into the public API).
 examples = []
+# Phase 5+ integration tests under tests/. Pulls in `examples` (PdJointController,
+# build_simple_arm_world, attach_standard_arm_ports) and gates the test files
+# themselves via `#![cfg(feature = "e2e")]`.
+e2e = ["examples"]
 
 [dependencies]
 rtf_core = { path = "../core" }
 rtf_sim = { path = "../sim" }
 nalgebra.workspace = true
+
+[dev-dependencies]
+rtf_harness = { path = "../harness" }
 
 [lints]
 workspace = true
