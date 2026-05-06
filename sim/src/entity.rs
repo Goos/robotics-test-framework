@@ -1,6 +1,9 @@
 /// Identifier for a sim entity. The kind tag distinguishes movable `Object`s
 /// from immovable `Fixture`s — same numeric id is intentionally distinct
 /// between kinds (design v2 §6).
+///
+/// Derived `Ord` sorts `Object(_) < Fixture(_)` by variant declaration order;
+/// downstream snapshot consumers may rely on this for deterministic frame output.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum EntityId {
     Object(u32),
