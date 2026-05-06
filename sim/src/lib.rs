@@ -7,6 +7,7 @@ pub mod primitive;
 pub mod rate_scheduler;
 pub mod scene;
 pub mod shape;
+pub mod sim_clock;
 pub mod visualizable;
 
 pub use entity::EntityId;
@@ -16,4 +17,5 @@ pub use primitive::{Color, Primitive, SceneSnapshot};
 pub use rate_scheduler::RateScheduler;
 pub use scene::Scene;
 pub use shape::Shape;
+pub use sim_clock::SimClock;
 pub use visualizable::Visualizable;
