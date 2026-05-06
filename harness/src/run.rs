@@ -1,20 +1,23 @@
-use rtf_core::{controller::Controller, goal::Goal};
+use rtf_core::{
+    controller::{ControlErrorKind, Controller},
+    goal::Goal,
+    time::{Duration, Time},
+};
 use rtf_sim::{recorder::Recorder, runnable_world::RunnableWorld};
 
 use crate::types::{RunConfig, RunResult, Termination};
 
-/// Drive a `RunnableWorld` to completion. Returns a `RunResult` summarizing
-/// the run's score, final time, and termination reason (design v2 §6).
+/// Drive a `RunnableWorld` to completion (design v2 §6). The tick loop is
+/// `publish_sensors → recorder.record(snapshot) → goal.tick → controller.step
+/// → consume_actuators_and_integrate(dt)`. Termination order each iteration:
+/// (1) deadline reached, (2) goal complete, (3) controller error.
 ///
-/// Step 4.2 skeleton: this returns immediately with a `Deadline` termination
-/// and a goal-evaluated score from the initial world state. The tick loop
-/// (controller step interleaved between `publish_sensors` and
-/// `consume_actuators_and_integrate`) lands in Step 4.3.
+/// Single-threaded (design v2 §10.3); no global state.
 pub fn run<W, C, G, R>(
-    world: W,
-    _controller: C,
-    goal: G,
-    _cfg: RunConfig<R>,
+    mut world: W,
+    mut controller: C,
+    mut goal: G,
+    mut cfg: RunConfig<R>,
 ) -> RunResult
 where
     W: RunnableWorld,
@@ -22,10 +25,34 @@ where
     G: Goal<W>,
     R: Recorder,
 {
+    let dt_ns = 1_000_000_000_i64 / cfg.tick_rate_hz as i64;
+    let dt = Duration::from_nanos(dt_ns);
+    let deadline_time = Time::from_nanos(cfg.deadline.as_nanos());
+
+    let terminated_by = loop {
+        if world.time() >= deadline_time { break Termination::Deadline; }
+        if goal.is_complete(&world) { break Termination::GoalComplete; }
+
+        world.publish_sensors();
+        cfg.recorder.record(&world.snapshot());
+        goal.tick(world.time(), &world);
+
+        match controller.step(world.time()) {
+            Ok(()) => {}
+            Err(e) if e.kind == ControlErrorKind::Recoverable => {
+                // Transient — keep ticking. (Phase 9: optionally surface via
+                // `recorder.record_event(...)` when `controller_events` is on.)
+            }
+            Err(e) => break Termination::ControllerError(e),
+        }
+
+        world.consume_actuators_and_integrate(dt);
+    };
+
     RunResult {
         score: goal.evaluate(&world),
         final_time: world.time(),
-        terminated_by: Termination::Deadline,
+        terminated_by,
     }
 }
 
@@ -66,5 +93,14 @@ mod tests {
         let res = run(W { t: Time::ZERO }, Noop, AlwaysHalf, cfg);
         assert!(matches!(res.terminated_by, Termination::Deadline));
         assert_eq!(res.score.value, 0.5);
+    }
+
+    #[test]
+    fn n_ticks_advance_world_time_by_n_dt() {
+        let cfg = RunConfig::default()
+            .with_deadline(Duration::from_millis(5))
+            .with_tick_rate(1000);
+        let res = run(W { t: Time::ZERO }, Noop, AlwaysHalf, cfg);
+        assert_eq!(res.final_time, Time::from_millis(5));
     }
 }
