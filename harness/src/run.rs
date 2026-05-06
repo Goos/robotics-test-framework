@@ -116,4 +116,25 @@ mod tests {
         assert!(matches!(res.terminated_by, Termination::GoalComplete));
         assert!(res.final_time >= Time::from_millis(3));
     }
+
+    #[test]
+    fn recorder_is_called_once_per_tick() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+        use rtf_sim::recorder::Recorder;
+
+        struct Counter(Rc<Cell<u32>>);
+        impl Recorder for Counter {
+            fn record(&mut self, _: &SceneSnapshot) { self.0.set(self.0.get() + 1); }
+        }
+
+        let counter = Rc::new(Cell::new(0u32));
+        let cfg = RunConfig::default()
+            .with_deadline(Duration::from_millis(5))
+            .with_tick_rate(1000)
+            .with_recorder(Counter(Rc::clone(&counter)));
+        let _ = run(W { t: Time::ZERO }, Noop, AlwaysHalf, cfg);
+        // 5 ticks at 1 kHz with 5 ms deadline → 5 record calls.
+        assert_eq!(counter.get(), 5);
+    }
 }
