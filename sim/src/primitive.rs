@@ -6,6 +6,7 @@ use crate::entity::EntityId;
 /// 8-bit-per-channel RGBA color for visualization primitives (design v2 §7).
 /// `const` constructors and named constants keep scenario code allocation-free.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Color { pub r: u8, pub g: u8, pub b: u8, pub a: u8 }
 
 impl Color {
@@ -21,6 +22,7 @@ impl Color {
 /// visualizer can support shapes the simulator doesn't (capsules, lines,
 /// labels) without bloating the physics types.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Primitive {
     Sphere  { pose: Isometry3<f32>, radius: f32, color: Color },
     Capsule { pose: Isometry3<f32>, half_height: f32, radius: f32, color: Color },
@@ -33,6 +35,7 @@ pub enum Primitive {
 /// pairs. The harness builds one of these every visual tick from `Visualizable`
 /// implementations and ships it to the recorder.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SceneSnapshot {
     pub t: Time,
     pub items: Vec<(EntityId, Primitive)>,

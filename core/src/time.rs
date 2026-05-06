@@ -8,10 +8,12 @@ const NANOS_PER_SEC: i64 = 1_000_000_000;
 
 /// Signed nanoseconds since scenario start. Range ±292 years.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Time(i64);
 
 /// Signed nanosecond duration. `Time - Time` yields `Duration`.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Duration(i64);
 
 impl Time {

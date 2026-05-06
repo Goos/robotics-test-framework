@@ -8,10 +8,12 @@ rtf_core = { path = "../core" }
 nalgebra.workspace = true
 rand.workspace = true
 rand_pcg.workspace = true
+serde = { version = "1", features = ["derive"], optional = true }
 
 [features]
 default = []
 controller_events = []
+serde = ["dep:serde", "rtf_core/serde", "nalgebra/serde-serialize"]
 
 [lints]
 workspace = true

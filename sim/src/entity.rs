@@ -5,6 +5,7 @@
 /// Derived `Ord` sorts `Object(_) < Fixture(_)` by variant declaration order;
 /// downstream snapshot consumers may rely on this for deterministic frame output.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum EntityId {
     Object(u32),
     Fixture(u32),

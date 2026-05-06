@@ -4,6 +4,10 @@
 //! never robot-kind crates. Default build has no external deps; `--features
 //! rerun` pulls in the rerun SDK for live + offline visualization.
 
+pub mod file_recorder;
+
+pub use file_recorder::FileRecorder;
+
 #[cfg(test)]
 mod tests {
     #[test]
