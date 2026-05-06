@@ -4,13 +4,24 @@
 
 use nalgebra::{Isometry3, Vector3};
 use rtf_core::port::{PortReader, PortRx, PortTx};
-use rtf_sim::scene::Scene;
+use rtf_sim::{
+    fixture::Fixture,
+    object::{Object, ObjectId, ObjectState, SupportId},
+    scene::Scene,
+    shape::Shape,
+};
 
 use crate::{
     ports::{GripperCommand, JointEncoderReading, JointId, JointVelocityCommand},
     spec::{ArmSpec, GripperSpec, JointSpec},
     world::{ArmWorld, RateHz},
 };
+
+/// Conventional ids for the pick-and-place scenario built by
+/// [`build_pick_and_place_world`]. Fixture id 0 is reserved for the table;
+/// the ground plane uses `u32::MAX` (per `Scene::with_ground`).
+pub const BLOCK_OBJECT_ID: ObjectId = ObjectId(1);
+pub const BIN_FIXTURE_ID: u32 = 2;
 
 /// Build an `ArmWorld` with `n_joints` z-axis revolute joints, 0.2 m **x-axis**
 /// link offsets, default gripper (proximity 0.02, max_grasp 0.05), gravity
@@ -31,6 +42,50 @@ pub fn build_simple_arm_world(n_joints: usize) -> ArmWorld {
     };
     ArmWorld::new(Scene::new(0), spec, /* gravity */ false)
 }
+
+/// Build the canonical pick-and-place world used by Phase 7 sample tasks:
+/// ground + a table fixture (id 0) + a bin fixture ([`BIN_FIXTURE_ID`]) + a
+/// graspable block ([`BLOCK_OBJECT_ID`]) pre-Settled on the table top, plus
+/// a 3-joint planar arm reaching from the origin. Gravity is ON.
+pub fn build_pick_and_place_world() -> ArmWorld {
+    use core::f32::consts::PI;
+    let mut scene = Scene::with_ground(0);
+
+    scene.add_fixture(Fixture {
+        id: 0,
+        pose: Isometry3::translation(0.5, 0.0, 0.475),
+        shape: Shape::Aabb { half_extents: Vector3::new(0.4, 0.4, 0.025) },
+        is_support: true,
+    });
+
+    scene.add_fixture(Fixture {
+        id: BIN_FIXTURE_ID,
+        pose: Isometry3::translation(0.0, 0.5, 0.55),
+        shape: Shape::Aabb { half_extents: Vector3::new(0.1, 0.1, 0.05) },
+        is_support: true,
+    });
+
+    scene.insert_object(Object {
+        id: BLOCK_OBJECT_ID,
+        pose: Isometry3::translation(0.5, 0.0, 0.525),
+        shape: Shape::Aabb { half_extents: Vector3::new(0.025, 0.025, 0.025) },
+        mass: 0.1,
+        graspable: true,
+        state: ObjectState::Settled { on: SupportId::Fixture(0) },
+        lin_vel: Vector3::zeros(),
+    });
+
+    let spec = ArmSpec {
+        joints: vec![JointSpec::Revolute { axis: Vector3::z_axis(), limits: (-PI, PI) }; 3],
+        link_offsets: vec![Isometry3::translation(0.2, 0.0, 0.0); 3],
+        gripper: GripperSpec { proximity_threshold: 0.1, max_grasp_size: 0.1 },
+    };
+
+    ArmWorld::new(scene, spec, /* gravity */ true)
+}
+
+pub fn block_id(_world: &ArmWorld) -> ObjectId { BLOCK_OBJECT_ID }
+pub fn bin_id(_world: &ArmWorld) -> u32 { BIN_FIXTURE_ID }
 
 /// Bundle of every port the canonical PD + gripper controller needs:
 /// per-joint encoder receivers + velocity senders, plus a single gripper
@@ -78,5 +133,15 @@ mod tests {
         let ports = world.attach_standard_arm_ports();
         assert_eq!(ports.encoder_rxs.len(), 2);
         assert_eq!(ports.velocity_txs.len(), 2);
+    }
+
+    #[test]
+    fn pick_and_place_world_has_table_bin_and_block() {
+        let world = build_pick_and_place_world();
+        assert_eq!(world.scene.fixtures().count(), 3);
+        assert!(world.scene.object(BLOCK_OBJECT_ID).is_some());
+        assert_eq!(block_id(&world), BLOCK_OBJECT_ID);
+        assert_eq!(bin_id(&world), BIN_FIXTURE_ID);
+        assert!(world.gravity_enabled);
     }
 }
