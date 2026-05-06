@@ -5,6 +5,7 @@ pub mod arm;
 pub mod examples_;
 pub mod fk;
 pub mod goals;
+pub mod ik;
 pub mod ports;
 pub mod spec;
 pub mod state;
