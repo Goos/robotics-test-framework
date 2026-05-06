@@ -1,7 +1,7 @@
 //! Rerun recorder — gated on the `rerun` feature. Maps `Primitive` variants
-//! onto rerun archetypes, one entity path per `EntityId`. Step 8.3a covers
-//! `Sphere` only; remaining variants (Box/Capsule/Line/Label) land in
-//! 8.3b–e.
+//! onto rerun archetypes, one entity path per `EntityId`. Steps 8.3a/8.3b
+//! cover `Sphere` and `Box`; remaining variants (Capsule/Line/Label) land in
+//! 8.3c–e.
 
 use rtf_sim::{
     primitive::{Primitive, SceneSnapshot},
@@ -31,9 +31,6 @@ impl Recorder for RerunRecorder {
         );
         for (entity, prim) in &snapshot.items {
             let path = format!("{entity:?}");
-            // The single-arm match is a stepping stone for 8.3b–e, which
-            // add Box/Capsule/Line/Label arms. The wildcard is intentional.
-            #[allow(clippy::single_match)]
             match prim {
                 Primitive::Sphere { pose, radius, color: _ } => {
                     let pos = [
@@ -44,6 +41,21 @@ impl Recorder for RerunRecorder {
                     let _ = self.stream.log(
                         path.as_str(),
                         &rerun::archetypes::Points3D::new([pos]).with_radii([*radius]),
+                    );
+                }
+                Primitive::Box { pose, half_extents, color: _ } => {
+                    let center = [
+                        pose.translation.x,
+                        pose.translation.y,
+                        pose.translation.z,
+                    ];
+                    let half_size = [half_extents.x, half_extents.y, half_extents.z];
+                    let _ = self.stream.log(
+                        path.as_str(),
+                        &rerun::archetypes::Boxes3D::from_centers_and_half_sizes(
+                            [center],
+                            [half_size],
+                        ),
                     );
                 }
                 _ => {}
@@ -69,6 +81,23 @@ mod tests {
                 Primitive::Sphere {
                     pose: Isometry3::identity(),
                     radius: 0.05,
+                    color: Color::WHITE,
+                },
+            )],
+        });
+    }
+
+    #[test]
+    fn rerun_recorder_records_a_box() {
+        use nalgebra::Vector3;
+        let mut rec = RerunRecorder::in_memory("test").unwrap();
+        rec.record(&SceneSnapshot {
+            t: Time::from_nanos(0),
+            items: vec![(
+                EntityId::Fixture(0),
+                Primitive::Box {
+                    pose: Isometry3::identity(),
+                    half_extents: Vector3::new(0.05, 0.05, 0.05),
                     color: Color::WHITE,
                 },
             )],
