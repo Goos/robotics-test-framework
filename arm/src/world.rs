@@ -60,11 +60,16 @@ pub struct ArmWorld {
     pub scene: Scene,
     pub arm: Arm,
     pub gravity_enabled: bool,
-    /// Authoritative sim time. Advanced from Step 3.12 (`tick`).
-    #[allow(dead_code)]
+    /// Authoritative sim time. Advanced by `consume_actuators_and_integrate`
+    /// and read by `publish_sensors` (and by the trait `time()` accessor).
     sim_time: Time,
+    /// Last `sim_time` we published sensors at. The trait `publish_sensors`
+    /// computes `dt = sim_time - last_publish_time`, calls
+    /// `publish_sensors_for_dt(dt)`, then updates this watermark.
+    last_publish_time: Time,
     /// Shared injectable clock. Exposed via `sim_clock_handle` (Step 3.7.5);
-    /// advanced in Step 3.12. Phase 9 fault wrappers also clone this Rc.
+    /// advanced in lockstep with `sim_time`. Phase 9 fault wrappers also
+    /// clone this Rc.
     sim_clock: Rc<SimClock>,
     /// Monotonic port-id counter. Allocated by Steps 3.8–3.10 attach helpers.
     next_port_id: u32,
@@ -86,6 +91,7 @@ impl ArmWorld {
             arm: Arm { spec, state: ArmState::zeros(n), id: 0 },
             gravity_enabled,
             sim_time: Time::ZERO,
+            last_publish_time: Time::ZERO,
             sim_clock: Rc::new(SimClock::new()),
             next_port_id: 0,
             sensors_joint_encoder: BTreeMap::new(),
@@ -171,7 +177,10 @@ impl ArmWorld {
     /// Drain all actuator ports, integrate joint state forward by `dt`, and
     /// advance the sim clock (design v2 §5.7). Velocity, gripper, and
     /// grasped-object pose tracking as of Step 3.11e; gravity in Phase 6.
-    pub fn consume_actuators_and_integrate(&mut self, dt: Duration) {
+    ///
+    /// Named `_inner` so the `RunnableWorld::consume_actuators_and_integrate`
+    /// trait method can delegate here without recursing into itself.
+    pub fn consume_actuators_and_integrate_inner(&mut self, dt: Duration) {
         let dt_s = dt.as_nanos() as f32 / 1.0e9_f32;
 
         // Drain joint-velocity commands; latest wins per port. Collect first
@@ -294,6 +303,40 @@ impl ArmWorld {
             }
         }
     }
+
+    /// Look up a scene object by id. Convenience pass-through used by goal
+    /// and test code so callers don't need to reach through `world.scene`.
+    pub fn object(&self, id: rtf_sim::object::ObjectId) -> Option<&rtf_sim::object::Object> {
+        self.scene.object(id)
+    }
+}
+
+impl rtf_core::world_view::WorldView for ArmWorld {}
+
+impl rtf_sim::runnable_world::RunnableWorld for ArmWorld {
+    /// Compute the elapsed `dt` since the last publish, advance every sensor
+    /// scheduler, and refresh the watermark. Bridges the trait's no-arg shape
+    /// to the inherent `publish_sensors_for_dt(dt)` (design v2 §5.7).
+    fn publish_sensors(&mut self) {
+        let dt = self.sim_time - self.last_publish_time;
+        self.publish_sensors_for_dt(dt);
+        self.last_publish_time = self.sim_time;
+    }
+
+    fn consume_actuators_and_integrate(&mut self, dt: Duration) {
+        self.consume_actuators_and_integrate_inner(dt);
+    }
+
+    fn snapshot(&self) -> rtf_sim::primitive::SceneSnapshot {
+        use rtf_sim::visualizable::Visualizable;
+        let mut items = Vec::new();
+        for (_, fix) in self.scene.fixtures() { fix.append_primitives(&mut items); }
+        for (_, obj) in self.scene.objects() { obj.append_primitives(&mut items); }
+        self.arm.append_primitives(&mut items);
+        rtf_sim::primitive::SceneSnapshot { t: self.sim_time, items }
+    }
+
+    fn time(&self) -> Time { self.sim_time }
 }
 
 #[cfg(test)]
@@ -400,7 +443,7 @@ mod tests {
         let mut world = ArmWorld::new(Scene::new(0), simple_spec(), true);
         let tx = world.attach_joint_velocity_actuator(JointId(0));
         tx.send(JointVelocityCommand { joint: JointId(0), q_dot_target: 1.0 });
-        world.consume_actuators_and_integrate(Duration::from_millis(10));
+        world.consume_actuators_and_integrate_inner(Duration::from_millis(10));
         assert!(world.arm.state.q[0] > 0.0);
     }
 
@@ -419,13 +462,23 @@ mod tests {
 
         let g_tx = world.attach_gripper_actuator();
         g_tx.send(GripperCommand { close: true });
-        world.consume_actuators_and_integrate(Duration::from_millis(1));
+        world.consume_actuators_and_integrate_inner(Duration::from_millis(1));
 
         assert_eq!(world.arm.state.grasped, Some(block_id));
         assert!(matches!(
             world.scene.object(block_id).unwrap().state,
             ObjectState::Grasped { .. }
         ));
+    }
+
+    #[test]
+    fn arm_world_implements_runnable_world() {
+        use rtf_sim::runnable_world::RunnableWorld;
+        let world = ArmWorld::new(Scene::new(0), simple_spec(), true);
+        let snap = world.snapshot();
+        assert_eq!(snap.t, RunnableWorld::time(&world));
+        // 2 capsules (one per link) + 1 box (gripper) for a 2-joint arm = 3.
+        assert!(snap.items.len() >= 3);
     }
 
     #[test]
@@ -443,11 +496,11 @@ mod tests {
         let v_tx = world.attach_joint_velocity_actuator(JointId(0));
         let g_tx = world.attach_gripper_actuator();
         g_tx.send(GripperCommand { close: true });
-        world.consume_actuators_and_integrate(Duration::from_millis(1));
+        world.consume_actuators_and_integrate_inner(Duration::from_millis(1));
         let pose_before = world.scene.object(block_id).unwrap().pose;
 
         v_tx.send(JointVelocityCommand { joint: JointId(0), q_dot_target: 1.0 });
-        world.consume_actuators_and_integrate(Duration::from_millis(50));
+        world.consume_actuators_and_integrate_inner(Duration::from_millis(50));
         let pose_after = world.scene.object(block_id).unwrap().pose;
 
         assert_ne!(pose_before.translation.vector, pose_after.translation.vector);
