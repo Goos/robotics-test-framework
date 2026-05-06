@@ -15,7 +15,7 @@ pub mod visualizable;
 
 pub use entity::EntityId;
 pub use fixture::Fixture;
-pub use gravity::{find_support_beneath, GRAVITY_M_PER_S2, SETTLE_EPSILON_M};
+pub use gravity::{find_support_beneath, gravity_step, GRAVITY_M_PER_S2, SETTLE_EPSILON_M};
 pub use object::{ArmRef, Object, ObjectId, ObjectState, SupportId};
 pub use primitive::{Color, Primitive, SceneSnapshot};
 pub use rate_scheduler::RateScheduler;

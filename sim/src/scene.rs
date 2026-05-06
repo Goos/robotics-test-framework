@@ -42,6 +42,12 @@ impl Scene {
         self.objects.iter()
     }
 
+    /// Mutable iteration over objects (BTreeMap-ordered, deterministic).
+    /// Used by `gravity::gravity_step` to integrate Free objects' z-velocity.
+    pub fn objects_mut(&mut self) -> impl Iterator<Item = (&ObjectId, &mut Object)> {
+        self.objects.iter_mut()
+    }
+
     pub fn fixtures(&self) -> impl Iterator<Item = (&u32, &Fixture)> {
         self.fixtures.iter()
     }

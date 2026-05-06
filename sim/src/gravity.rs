@@ -63,6 +63,19 @@ fn shape_xy_contains(pose: Isometry3<f32>, shape: &Shape, xy: (f32, f32)) -> boo
     }
 }
 
+/// Per-tick gravity integration (design v2 §5.5). v1 of this function (Step
+/// 6.3a): integrates `lin_vel.z -= g·dt` and `pose.z += lin_vel.z·dt` for
+/// every Free object. Snap-to-support and Settled-transition arrive in 6.3b.
+/// `dt_ns` matches the harness's tick `Duration::as_nanos()` (i64).
+pub fn gravity_step(scene: &mut Scene, dt_ns: i64) {
+    let dt_s = dt_ns as f32 / 1.0e9_f32;
+    for (_id, obj) in scene.objects_mut() {
+        if !matches!(obj.state, ObjectState::Free) { continue; }
+        obj.lin_vel.z -= GRAVITY_M_PER_S2 * dt_s;
+        obj.pose.translation.z += obj.lin_vel.z * dt_s;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -109,5 +122,28 @@ mod tests_support {
         });
         let support = find_support_beneath(&scene, (5.0, 5.0), 1.0, None);
         assert!(support.is_none());
+    }
+
+    #[test]
+    fn free_object_falls_under_gravity_with_no_supports() {
+        use crate::object::{Object, ObjectId};
+        use nalgebra::Isometry3;
+        let mut scene = Scene::new(0); // no with_ground; nothing to land on
+        let id = ObjectId(1);
+        scene.insert_object(Object::new(
+            id,
+            Isometry3::translation(0.0, 0.0, 1.0),
+            Shape::Sphere { radius: 0.05 },
+            0.1,
+            true,
+        ));
+        let z_before = scene.object(id).unwrap().pose.translation.z;
+        super::gravity_step(&mut scene, 1_000_000); // 1 ms
+        let z_after = scene.object(id).unwrap().pose.translation.z;
+        assert!(
+            z_after < z_before,
+            "object should have fallen; z_before={}, z_after={}",
+            z_before, z_after,
+        );
     }
 }
