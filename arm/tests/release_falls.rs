@@ -1,0 +1,97 @@
+//! Step 6.6: Released-object integration test. Drives an `ArmWorld` manually
+//! (no `harness::run` because it consumes the world) through the full grasp →
+//! release → gravity-fall → settle cycle.
+
+#![cfg(feature = "e2e")]
+
+use nalgebra::{Isometry3, Vector3};
+
+use rtf_arm::{
+    ports::{GripperCommand, JointId},
+    spec::{ArmSpec, GripperSpec, JointSpec},
+    world::ArmWorld,
+};
+use rtf_core::time::Duration;
+use rtf_sim::{
+    fixture::Fixture,
+    object::{Object, ObjectId, ObjectState},
+    scene::Scene,
+    shape::Shape,
+};
+
+#[test]
+fn object_grasped_then_released_falls_to_table() {
+    // Build scene: ground + a table fixture (table is informational here; the
+    // block lands on the ground in this v1 test since we don't move the EE
+    // over the table — we just verify the grasp/release/settle cycle).
+    let mut scene = Scene::with_ground(0);
+    scene.add_fixture(Fixture {
+        id: 0,
+        pose: Isometry3::translation(0.5, 0.0, 0.475),
+        shape: Shape::Aabb { half_extents: Vector3::new(0.4, 0.4, 0.025) },
+        is_support: true,
+    });
+
+    // Arm geometry: first link goes straight up so the EE sits at z=1.0
+    // (=0.5+0.2+0.2+0.1 with the chained transforms), well above the ground.
+    // The block starts at the EE so the gripper's first close grasps it.
+    use core::f32::consts::PI;
+    let spec = ArmSpec {
+        joints: vec![JointSpec::Revolute { axis: Vector3::z_axis(), limits: (-PI, PI) }; 3],
+        link_offsets: vec![
+            Isometry3::translation(0.0, 0.0, 1.0),
+            Isometry3::translation(0.2, 0.0, 0.0),
+            Isometry3::translation(0.2, 0.0, 0.0),
+        ],
+        gripper: GripperSpec { proximity_threshold: 0.5, max_grasp_size: 0.1 },
+    };
+
+    let block_id = ObjectId(99);
+    scene.insert_object(Object::new(
+        block_id,
+        Isometry3::translation(0.4, 0.0, 1.0),
+        Shape::Sphere { radius: 0.025 },
+        0.1,
+        true,
+    ));
+    let mut world = ArmWorld::new(scene, spec, /* gravity */ true);
+    let _v_txs: Vec<_> = (0..3)
+        .map(|i| world.attach_joint_velocity_actuator(JointId(i as u32)))
+        .collect();
+    let g_tx = world.attach_gripper_actuator();
+
+    // Phase 1: close gripper → grasp.
+    g_tx.send(GripperCommand { close: true });
+    for _ in 0..5 {
+        world.consume_actuators_and_integrate_inner(Duration::from_millis(1));
+    }
+    assert_eq!(
+        world.arm.state.grasped,
+        Some(block_id),
+        "block should be grasped after 5 close ticks"
+    );
+
+    // Phase 2: hold position (no joint velocity sent).
+    for _ in 0..195 {
+        world.consume_actuators_and_integrate_inner(Duration::from_millis(1));
+    }
+    assert_eq!(world.arm.state.grasped, Some(block_id), "should still be grasped");
+
+    // Phase 3: open gripper → release.
+    g_tx.send(GripperCommand { close: false });
+    for _ in 0..10 {
+        world.consume_actuators_and_integrate_inner(Duration::from_millis(1));
+    }
+    assert_eq!(world.arm.state.grasped, None, "block should be released");
+
+    // Phase 4: gravity pulls the released block down. Plenty of headroom.
+    for _ in 0..2000 {
+        world.consume_actuators_and_integrate_inner(Duration::from_millis(1));
+    }
+    let block = world.scene.object(block_id).expect("block exists");
+    assert!(
+        matches!(block.state, ObjectState::Settled { .. }),
+        "block should have settled (ground or table); got state {:?}",
+        block.state,
+    );
+}
