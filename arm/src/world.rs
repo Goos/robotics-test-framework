@@ -169,9 +169,8 @@ impl ArmWorld {
     }
 
     /// Drain all actuator ports, integrate joint state forward by `dt`, and
-    /// advance the sim clock (design v2 §5.7). Velocity + gripper as of
-    /// Step 3.11d; grasped-object pose tracking lands in Step 3.11e; gravity
-    /// in Phase 6.
+    /// advance the sim clock (design v2 §5.7). Velocity, gripper, and
+    /// grasped-object pose tracking as of Step 3.11e; gravity in Phase 6.
     pub fn consume_actuators_and_integrate(&mut self, dt: Duration) {
         let dt_s = dt.as_nanos() as f32 / 1.0e9_f32;
 
@@ -203,6 +202,16 @@ impl ArmWorld {
 
         if let Some(cmd) = gripper_cmd {
             self.apply_gripper_command(cmd);
+        }
+
+        // Grasped object is welded to the EE — refresh its pose from the
+        // post-integration EE so the visualization and downstream queries see
+        // it move with the arm (design v2 §5.4).
+        if let Some(grasped_id) = self.arm.state.grasped {
+            let ee = self.ee_pose();
+            if let Some(obj) = self.scene.object_mut(grasped_id) {
+                obj.pose = ee;
+            }
         }
 
         // Advance authoritative sim time and the shared clock together.
@@ -299,6 +308,20 @@ mod tests {
         ArmSpec {
             joints: vec![JointSpec::Revolute { axis: Vector3::z_axis(), limits: (-PI, PI) }; 2],
             link_offsets: vec![Isometry3::translation(0.0, 0.0, 0.1); 2],
+            gripper: GripperSpec { proximity_threshold: 0.02, max_grasp_size: 0.05 },
+        }
+    }
+
+    /// Test fixture for grasp-tracking tests: x-axis link offsets so a single
+    /// joint-0 rotation about z swings the EE in the xy plane (the default
+    /// `simple_spec` has z-axis offsets, which leaves the EE on the rotation
+    /// axis and therefore invariant under joint motion).
+    fn moving_ee_spec() -> crate::spec::ArmSpec {
+        use crate::spec::{ArmSpec, GripperSpec, JointSpec};
+        use nalgebra::{Isometry3, Vector3};
+        ArmSpec {
+            joints: vec![JointSpec::Revolute { axis: Vector3::z_axis(), limits: (-3.2, 3.2) }; 2],
+            link_offsets: vec![Isometry3::translation(0.5, 0.0, 0.0); 2],
             gripper: GripperSpec { proximity_threshold: 0.02, max_grasp_size: 0.05 },
         }
     }
@@ -403,5 +426,32 @@ mod tests {
             world.scene.object(block_id).unwrap().state,
             ObjectState::Grasped { .. }
         ));
+    }
+
+    #[test]
+    fn grasped_object_pose_tracks_ee() {
+        use rtf_core::time::Duration;
+        use rtf_sim::object::{Object, ObjectId};
+        use rtf_sim::shape::Shape;
+
+        let mut world = ArmWorld::new(Scene::new(0), moving_ee_spec(), true);
+        let block_id = ObjectId(42);
+        world.scene.insert_object(Object::new(
+            block_id, world.ee_pose(), Shape::Sphere { radius: 0.01 }, 0.1, true,
+        ));
+
+        let v_tx = world.attach_joint_velocity_actuator(JointId(0));
+        let g_tx = world.attach_gripper_actuator();
+        g_tx.send(GripperCommand { close: true });
+        world.consume_actuators_and_integrate(Duration::from_millis(1));
+        let pose_before = world.scene.object(block_id).unwrap().pose;
+
+        v_tx.send(JointVelocityCommand { joint: JointId(0), q_dot_target: 1.0 });
+        world.consume_actuators_and_integrate(Duration::from_millis(50));
+        let pose_after = world.scene.object(block_id).unwrap().pose;
+
+        assert_ne!(pose_before.translation.vector, pose_after.translation.vector);
+        let ee = world.ee_pose();
+        assert!((pose_after.translation.vector - ee.translation.vector).norm() < 1e-4);
     }
 }
