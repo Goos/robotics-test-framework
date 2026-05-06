@@ -63,16 +63,52 @@ fn shape_xy_contains(pose: Isometry3<f32>, shape: &Shape, xy: (f32, f32)) -> boo
     }
 }
 
-/// Per-tick gravity integration (design v2 §5.5). v1 of this function (Step
-/// 6.3a): integrates `lin_vel.z -= g·dt` and `pose.z += lin_vel.z·dt` for
-/// every Free object. Snap-to-support and Settled-transition arrive in 6.3b.
-/// `dt_ns` matches the harness's tick `Duration::as_nanos()` (i64).
+/// Per-tick gravity integration with snap-to-support (design v2 §5.5).
+///
+/// Two-pass over Free objects to dodge the `objects_mut`/`find_support_beneath`
+/// alias borrow: (1) compute `(new_z, new_lin_vel_z)` for each Free object via
+/// `&self`; (2) for each, look up the highest support beneath. If the bottom
+/// has reached `top_z + SETTLE_EPSILON_M`, snap z to `top_z + half_height`,
+/// zero z-velocity, and transition to `Settled { on: support_id }`; otherwise
+/// commit the integrated state in place.
+///
+/// Iteration order is by ObjectId (BTreeMap); 6.3c may refine the tiebreak.
 pub fn gravity_step(scene: &mut Scene, dt_ns: i64) {
     let dt_s = dt_ns as f32 / 1.0e9_f32;
-    for (_id, obj) in scene.objects_mut() {
+
+    // Phase 1: integrate Free objects (collect new states).
+    let mut updates: Vec<(ObjectId, f32, f32)> = Vec::new(); // (id, new_z, new_lin_vel_z)
+    for (id, obj) in scene.objects() {
         if !matches!(obj.state, ObjectState::Free) { continue; }
-        obj.lin_vel.z -= GRAVITY_M_PER_S2 * dt_s;
-        obj.pose.translation.z += obj.lin_vel.z * dt_s;
+        let new_lin_vel_z = obj.lin_vel.z - GRAVITY_M_PER_S2 * dt_s;
+        let new_z = obj.pose.translation.z + new_lin_vel_z * dt_s;
+        updates.push((*id, new_z, new_lin_vel_z));
+    }
+
+    // Phase 2: for each updated object, find support and either snap or commit.
+    for (id, new_z, new_lin_vel_z) in updates {
+        let (xy, half_height_z) = {
+            let obj = scene.object(id).expect("object must exist");
+            (
+                (obj.pose.translation.x, obj.pose.translation.y),
+                obj.shape.half_height_z(),
+            )
+        };
+        let bottom_z = new_z - half_height_z;
+        let support = find_support_beneath(scene, xy, new_z, Some(id));
+        match support {
+            Some((support_id, top_z)) if bottom_z <= top_z + SETTLE_EPSILON_M => {
+                let obj = scene.object_mut(id).expect("object must exist");
+                obj.pose.translation.z = top_z + half_height_z;
+                obj.lin_vel.z = 0.0;
+                obj.state = ObjectState::Settled { on: support_id };
+            }
+            _ => {
+                let obj = scene.object_mut(id).expect("object must exist");
+                obj.pose.translation.z = new_z;
+                obj.lin_vel.z = new_lin_vel_z;
+            }
+        }
     }
 }
 
@@ -145,5 +181,33 @@ mod tests_support {
             "object should have fallen; z_before={}, z_after={}",
             z_before, z_after,
         );
+    }
+
+    #[test]
+    fn free_object_falls_until_it_meets_a_fixture() {
+        use crate::object::{Object, ObjectId, ObjectState};
+        use nalgebra::Isometry3;
+        let mut scene = Scene::with_ground(0);
+        let _table = scene.add_fixture(Fixture {
+            id: 0,
+            pose: Isometry3::translation(0.0, 0.0, 0.5),
+            shape: Shape::Aabb { half_extents: Vector3::new(0.2, 0.2, 0.01) },
+            is_support: true,
+        });
+        let id = ObjectId(1);
+        scene.insert_object(Object::new(
+            id,
+            Isometry3::translation(0.0, 0.0, 1.0),
+            Shape::Sphere { radius: 0.05 },
+            0.1,
+            true,
+        ));
+        for _ in 0..2000 {
+            super::gravity_step(&mut scene, 1_000_000);
+        }
+        let o = scene.object(id).unwrap();
+        assert!(matches!(o.state, ObjectState::Settled { .. }));
+        let table_top_z = 0.5 + 0.01;
+        assert!((o.pose.translation.z - (table_top_z + 0.05)).abs() < 1e-3);
     }
 }
