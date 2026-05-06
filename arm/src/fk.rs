@@ -19,7 +19,7 @@ pub fn joint_transform(spec: &JointSpec, q: f32) -> Isometry3<f32> {
 
 /// Multi-joint forward kinematics (design v2 §5.3): composes per-joint
 /// transforms and per-link offsets in chain order. For joint i with
-/// coordinate q[i] and link offset L_i, the chain is
+/// coordinate `q[i]` and link offset `L_i`, the chain is
 /// `T_0 = I, T_{i+1} = T_i · J_i(q_i) · L_i`. Returns the end-effector pose.
 pub fn forward_kinematics(spec: &ArmSpec, q: &[f32]) -> Isometry3<f32> {
     spec.joints.iter().enumerate().fold(Isometry3::identity(), |acc, (i, joint)| {
