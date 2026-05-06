@@ -3,7 +3,7 @@ use std::rc::Rc;
 
 use rtf_core::port::{PortRx, PortTx};
 use rtf_core::port_id::PortId;
-use rtf_core::time::Time;
+use rtf_core::time::{Duration, Time};
 use rtf_sim::rate_scheduler::RateScheduler;
 use rtf_sim::scene::Scene;
 use rtf_sim::sim_clock::SimClock;
@@ -160,6 +160,26 @@ impl ArmWorld {
         });
         rx
     }
+
+    /// Advance every sensor scheduler by `dt` and publish a fresh reading on
+    /// each port that fires this step. Iteration order is `PortId` (BTreeMap),
+    /// keeping per-tick output deterministic across runs (design v2 §10.2).
+    /// Joint-encoder branch only in Step 3.11a; EE-pose etc. follow.
+    pub fn publish_sensors_for_dt(&mut self, dt: Duration) {
+        let dt_ns = dt.as_nanos();
+        let sampled_at = self.sim_time;
+        for pubr in self.sensors_joint_encoder.values_mut() {
+            if pubr.scheduler.tick(dt_ns) {
+                let i = pubr.joint.0 as usize;
+                pubr.tx.send(JointEncoderReading {
+                    joint: pubr.joint,
+                    q: self.arm.state.q[i],
+                    q_dot: self.arm.state.q_dot[i],
+                    sampled_at,
+                });
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -222,5 +242,17 @@ mod tests {
         let mut world = ArmWorld::new(Scene::new(0), simple_spec(), true);
         let _rx = world.attach_ee_pose_sensor(RateHz::new(100));
         assert_eq!(world.sensors_ee_pose.len(), 1);
+    }
+
+    #[test]
+    fn publish_sensors_emits_encoder_at_rate() {
+        use rtf_core::time::Duration;
+        let mut world = ArmWorld::new(Scene::new(0), simple_spec(), true);
+        let rx = world.attach_joint_encoder_sensor(JointId(0), RateHz::new(1000));
+        world.publish_sensors_for_dt(Duration::from_millis(1));
+        let r = rx.latest().expect("encoder published");
+        assert_eq!(r.joint, JointId(0));
+        assert_eq!(r.q, 0.0);
+        assert_eq!(r.q_dot, 0.0);
     }
 }
