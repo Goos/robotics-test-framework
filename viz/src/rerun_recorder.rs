@@ -13,11 +13,23 @@ pub struct RerunRecorder {
 
 impl RerunRecorder {
     /// In-memory recorder useful for tests and quick smoke runs; data is
-    /// buffered but never flushed to a viewer or disk. For viewer-attached
-    /// or saved recordings, prefer constructors added in Step 8.4.
+    /// buffered but never flushed to a viewer or disk. The accompanying
+    /// `MemorySinkStorage` handle is dropped, so the buffered bytes are
+    /// inaccessible to callers — fine for tests that only check the recorder
+    /// doesn't panic during a run.
     pub fn in_memory(name: &str) -> Result<Self, rerun::RecordingStreamError> {
         let (stream, _storage) = rerun::RecordingStreamBuilder::new(name).memory()?;
-        // Drop the storage handle — tests don't read back recorded bytes.
+        Ok(Self { stream })
+    }
+
+    /// Save recorded ticks to an `.rrd` file at `path`. Open the file with
+    /// `rerun <path>` (install the viewer once via `cargo install rerun-cli
+    /// --version 0.21`).
+    pub fn save_to_file(
+        path: impl Into<std::path::PathBuf>,
+        name: &str,
+    ) -> Result<Self, rerun::RecordingStreamError> {
+        let stream = rerun::RecordingStreamBuilder::new(name).save(path)?;
         Ok(Self { stream })
     }
 }

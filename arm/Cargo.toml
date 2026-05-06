@@ -12,6 +12,10 @@ examples = []
 # build_simple_arm_world, attach_standard_arm_ports) and gates the test files
 # themselves via `#![cfg(feature = "e2e")]`.
 e2e = ["examples"]
+# Phase 8: rerun-backed e2e variants. Pulls in `e2e` plus the rerun feature on
+# rtf_viz so the headline PickPlace test can plug a `RerunRecorder` into the
+# harness (via `--features viz-rerun`).
+viz-rerun = ["e2e", "rtf_viz/rerun"]
 
 [dependencies]
 rtf_core = { path = "../core" }
@@ -20,6 +24,7 @@ nalgebra.workspace = true
 
 [dev-dependencies]
 rtf_harness = { path = "../harness" }
+rtf_viz = { path = "../viz" }
 
 [lints]
 workspace = true
