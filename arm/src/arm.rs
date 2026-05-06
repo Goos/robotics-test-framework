@@ -18,7 +18,15 @@ pub struct Arm {
 }
 
 const LINK_RADIUS: f32 = 0.02;
-const GRIPPER_HALF_EXTENTS: Vector3<f32> = Vector3::new(0.04, 0.04, 0.02);
+/// Half-extents of each finger pillar (small thin box, 4 cm long along EE +z).
+const FINGER_HALF_EXTENTS: Vector3<f32> = Vector3::new(0.01, 0.01, 0.04);
+/// Lateral separation of finger centers along EE +y when the gripper is open.
+const FINGER_OPEN_SEPARATION: f32 = 0.04;
+/// Lateral separation of finger centers along EE +y when the gripper is closed.
+const FINGER_CLOSED_SEPARATION: f32 = 0.012;
+/// Forward offset of the fingers along EE +z so they protrude past the EE
+/// origin (matches `FINGER_HALF_EXTENTS.z` so fingers extend from EE surface).
+const FINGER_FORWARD_OFFSET: f32 = 0.04;
 
 impl Visualizable for Arm {
     fn append_primitives(&self, out: &mut Vec<(EntityId, Primitive)>) {
@@ -50,11 +58,25 @@ impl Visualizable for Arm {
             }));
             acc *= link_offset;
         }
-        out.push((EntityId::Object(self.id * 1000 + 999), Primitive::Box {
-            pose: acc,
-            half_extents: GRIPPER_HALF_EXTENTS,
-            color: Color::RED,
-        }));
+        // Articulated gripper: two finger pillars whose lateral separation
+        // is the visual proxy for the gripper open/close state. Both fingers
+        // protrude forward of the EE origin along its local +z.
+        let separation = if self.state.gripper_closed {
+            FINGER_CLOSED_SEPARATION
+        } else {
+            FINGER_OPEN_SEPARATION
+        };
+        for (slot, sign) in [(998, 1.0_f32), (999, -1.0_f32)] {
+            let finger_pose = acc * Isometry3::from_parts(
+                Translation3::new(0.0, sign * separation, FINGER_FORWARD_OFFSET),
+                UnitQuaternion::identity(),
+            );
+            out.push((EntityId::Object(self.id * 1000 + slot), Primitive::Box {
+                pose: finger_pose,
+                half_extents: FINGER_HALF_EXTENTS,
+                color: Color::RED,
+            }));
+        }
     }
 }
 
@@ -68,7 +90,7 @@ mod tests {
     use rtf_sim::visualizable::Visualizable;
 
     #[test]
-    fn appends_n_capsules_and_one_box() {
+    fn appends_n_capsules_and_two_finger_boxes() {
         let spec = ArmSpec {
             joints: vec![JointSpec::Revolute { axis: Vector3::z_axis(), limits: (-3.2, 3.2) }; 3],
             link_offsets: vec![Isometry3::translation(0.0, 0.0, 0.1); 3],
@@ -81,6 +103,6 @@ mod tests {
         let n_capsules = out.iter().filter(|(_, p)| matches!(p, Primitive::Capsule { .. })).count();
         let n_boxes = out.iter().filter(|(_, p)| matches!(p, Primitive::Box { .. })).count();
         assert_eq!(n_capsules, 3);
-        assert_eq!(n_boxes, 1);
+        assert_eq!(n_boxes, 2);
     }
 }
