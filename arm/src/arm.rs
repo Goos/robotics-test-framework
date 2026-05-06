@@ -26,10 +26,21 @@ impl Visualizable for Arm {
         for (i, joint) in self.spec.joints.iter().enumerate() {
             acc *= joint_transform(joint, self.state.q[i]);
             let link_offset = self.spec.link_offsets[i];
-            let half_height = (link_offset.translation.vector.norm() / 2.0).max(0.001);
+            let link_vec = link_offset.translation.vector;
+            let half_height = (link_vec.norm() / 2.0).max(0.001);
+            // Orient the capsule so its local +Z axis aligns with the link
+            // direction. Without this rotation the capsule "stick" would be
+            // drawn perpendicular to the actual link (since `Capsule`'s axis
+            // is local +Z but the link points wherever the offset translates).
+            let z_to_link = if link_vec.norm() > 0.0 {
+                UnitQuaternion::rotation_between(&Vector3::z(), &link_vec.normalize())
+                    .unwrap_or_else(UnitQuaternion::identity)
+            } else {
+                UnitQuaternion::identity()
+            };
             let mid = acc * Isometry3::from_parts(
-                Translation3::from(link_offset.translation.vector / 2.0),
-                UnitQuaternion::identity(),
+                Translation3::from(link_vec / 2.0),
+                z_to_link,
             );
             out.push((EntityId::Object(self.id * 1000 + i as u32), Primitive::Capsule {
                 pose: mid,

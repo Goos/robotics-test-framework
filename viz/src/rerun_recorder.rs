@@ -70,11 +70,13 @@ impl Recorder for RerunRecorder {
                     );
                 }
                 Primitive::Capsule { pose, half_height, radius, color: _ } => {
-                    // Fallback: render as two spheres at the capsule endpoints.
-                    // Rerun 0.21's `Capsules3D::from_endpoints_and_radii` is
-                    // gated behind the `glam` feature, which the rerun crate
-                    // doesn't enable by default; revisit if a future rerun
-                    // version exposes endpoint construction unconditionally.
+                    // Fallback: render as two endpoint spheres + a connecting
+                    // line (logged at a sub-path so it doesn't overwrite the
+                    // points archetype). Rerun 0.21's
+                    // `Capsules3D::from_endpoints_and_radii` is gated behind
+                    // the `glam` feature, which the rerun crate doesn't
+                    // enable by default; revisit if a future rerun version
+                    // exposes endpoint construction unconditionally.
                     let dir_z = pose.rotation.transform_vector(&nalgebra::Vector3::z());
                     let p1 = pose.translation.vector + dir_z * (*half_height);
                     let p2 = pose.translation.vector - dir_z * (*half_height);
@@ -85,6 +87,14 @@ impl Recorder for RerunRecorder {
                             [p2.x, p2.y, p2.z],
                         ])
                         .with_radii([*radius, *radius]),
+                    );
+                    let line_path = format!("{path}/link");
+                    let _ = self.stream.log(
+                        line_path.as_str(),
+                        &rerun::archetypes::LineStrips3D::new([vec![
+                            [p1.x, p1.y, p1.z],
+                            [p2.x, p2.y, p2.z],
+                        ]]),
                     );
                 }
                 Primitive::Line { from, to, color: _ } => {
