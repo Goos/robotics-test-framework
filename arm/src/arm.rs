@@ -1,0 +1,75 @@
+use nalgebra::{Isometry3, Translation3, UnitQuaternion, Vector3};
+use rtf_sim::entity::EntityId;
+use rtf_sim::primitive::{Color, Primitive};
+use rtf_sim::visualizable::Visualizable;
+
+use crate::fk::joint_transform;
+use crate::spec::ArmSpec;
+use crate::state::ArmState;
+
+/// Per-arm runtime aggregate (design v2 §5.3): immutable spec, per-tick
+/// mutable state, and a stable numeric id used to namespace visualization
+/// entity ids across multiple arms.
+#[derive(Clone, Debug)]
+pub struct Arm {
+    pub spec: ArmSpec,
+    pub state: ArmState,
+    pub id: u32,
+}
+
+const LINK_RADIUS: f32 = 0.02;
+const GRIPPER_HALF_EXTENTS: Vector3<f32> = Vector3::new(0.04, 0.04, 0.02);
+
+impl Visualizable for Arm {
+    fn append_primitives(&self, out: &mut Vec<(EntityId, Primitive)>) {
+        let mut acc = Isometry3::identity();
+        for (i, joint) in self.spec.joints.iter().enumerate() {
+            acc *= joint_transform(joint, self.state.q[i]);
+            let link_offset = self.spec.link_offsets[i];
+            let half_height = (link_offset.translation.vector.norm() / 2.0).max(0.001);
+            let mid = acc * Isometry3::from_parts(
+                Translation3::from(link_offset.translation.vector / 2.0),
+                UnitQuaternion::identity(),
+            );
+            out.push((EntityId::Object(self.id * 1000 + i as u32), Primitive::Capsule {
+                pose: mid,
+                half_height,
+                radius: LINK_RADIUS,
+                color: Color::WHITE,
+            }));
+            acc *= link_offset;
+        }
+        out.push((EntityId::Object(self.id * 1000 + 999), Primitive::Box {
+            pose: acc,
+            half_extents: GRIPPER_HALF_EXTENTS,
+            color: Color::RED,
+        }));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::spec::{ArmSpec, GripperSpec, JointSpec};
+    use crate::state::ArmState;
+    use nalgebra::{Isometry3, Vector3};
+    use rtf_sim::primitive::Primitive;
+    use rtf_sim::visualizable::Visualizable;
+
+    #[test]
+    fn appends_n_capsules_and_one_box() {
+        let spec = ArmSpec {
+            joints: vec![JointSpec::Revolute { axis: Vector3::z_axis(), limits: (-3.2, 3.2) }; 3],
+            link_offsets: vec![Isometry3::translation(0.0, 0.0, 0.1); 3],
+            gripper: GripperSpec { proximity_threshold: 0.02, max_grasp_size: 0.05 },
+        };
+        let state = ArmState::zeros(3);
+        let arm = Arm { spec, state, id: 0 };
+        let mut out = Vec::new();
+        arm.append_primitives(&mut out);
+        let n_capsules = out.iter().filter(|(_, p)| matches!(p, Primitive::Capsule { .. })).count();
+        let n_boxes = out.iter().filter(|(_, p)| matches!(p, Primitive::Box { .. })).count();
+        assert_eq!(n_capsules, 3);
+        assert_eq!(n_boxes, 1);
+    }
+}
