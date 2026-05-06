@@ -1,6 +1,7 @@
 //! rtf_sim — populated starting in Phase 1.
 
 pub mod entity;
+pub mod faults;
 pub mod fixture;
 pub mod gravity;
 pub mod object;

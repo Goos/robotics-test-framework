@@ -58,6 +58,19 @@ impl<T: Clone> PortReader<T> for PortRx<T> {
     }
 }
 
+/// Blanket impl so `Box<dyn PortReader<T>>` (and any other smart-pointer
+/// boxing) satisfies the `PortReader<T>` bound. Phase 9 fault wrappers compose
+/// into heterogeneous types, and erasing them as `Box<dyn PortReader<T>>` is
+/// the cleanest way to hand them to a controller that's generic over `R`.
+impl<T, R: ?Sized + PortReader<T>> PortReader<T> for Box<R> {
+    fn latest(&self) -> Option<T> {
+        (**self).latest()
+    }
+    fn take(&mut self) -> Option<T> {
+        (**self).take()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -97,5 +110,14 @@ mod tests {
         // — Phase 9 fault wrappers depend on it. Adding a generic method to
         // PortReader later would silently break this line.
         let _: Box<dyn PortReader<i32>> = Box::new(port::<i32>().1);
+    }
+
+    #[test]
+    fn boxed_dyn_port_reader_satisfies_bound() {
+        let (tx, rx) = port::<i32>();
+        tx.send(42);
+        let mut boxed: Box<dyn PortReader<i32>> = Box::new(rx);
+        fn pull<R: PortReader<i32>>(r: &mut R) -> Option<i32> { r.take() }
+        assert_eq!(pull(&mut boxed), Some(42));
     }
 }
