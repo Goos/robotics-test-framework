@@ -103,4 +103,17 @@ mod tests {
         let res = run(W { t: Time::ZERO }, Noop, AlwaysHalf, cfg);
         assert_eq!(res.final_time, Time::from_millis(5));
     }
+
+    #[test]
+    fn run_terminates_on_goal_complete_before_deadline() {
+        struct DoneAt(Time);
+        impl Goal<W> for DoneAt {
+            fn is_complete(&self, w: &W) -> bool { w.time() >= self.0 }
+            fn evaluate(&self, _: &W) -> Score { Score::new(1.0) }
+        }
+        let cfg = RunConfig::default().with_deadline(Duration::from_millis(10));
+        let res = run(W { t: Time::ZERO }, Noop, DoneAt(Time::from_millis(3)), cfg);
+        assert!(matches!(res.terminated_by, Termination::GoalComplete));
+        assert!(res.final_time >= Time::from_millis(3));
+    }
 }
