@@ -5,6 +5,7 @@ pub mod fk;
 pub mod ports;
 pub mod spec;
 pub mod state;
+pub mod world;
 
 pub use arm::Arm;
 pub use fk::{forward_kinematics, joint_transform};
@@ -13,3 +14,4 @@ pub use ports::{
 };
 pub use spec::{ArmSpec, GripperSpec, JointSpec};
 pub use state::ArmState;
+pub use world::ArmWorld;
