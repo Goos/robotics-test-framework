@@ -8,6 +8,8 @@ pub mod goals;
 pub mod ports;
 pub mod spec;
 pub mod state;
+#[cfg(any(test, feature = "examples"))]
+pub mod test_helpers;
 pub mod world;
 
 pub use arm::Arm;
