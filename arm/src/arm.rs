@@ -50,7 +50,7 @@ impl Visualizable for Arm {
                 Translation3::from(link_vec / 2.0),
                 z_to_link,
             );
-            out.push((EntityId::Object(self.id * 1000 + i as u32), Primitive::Capsule {
+            out.push((EntityId::Arm { arm_id: self.id, slot: i as u32 }, Primitive::Capsule {
                 pose: mid,
                 half_height,
                 radius: LINK_RADIUS,
@@ -71,7 +71,7 @@ impl Visualizable for Arm {
                 Translation3::new(0.0, sign * separation, FINGER_FORWARD_OFFSET),
                 UnitQuaternion::identity(),
             );
-            out.push((EntityId::Object(self.id * 1000 + slot), Primitive::Box {
+            out.push((EntityId::Arm { arm_id: self.id, slot }, Primitive::Box {
                 pose: finger_pose,
                 half_extents: FINGER_HALF_EXTENTS,
                 color: Color::RED,
@@ -104,5 +104,23 @@ mod tests {
         let n_boxes = out.iter().filter(|(_, p)| matches!(p, Primitive::Box { .. })).count();
         assert_eq!(n_capsules, 3);
         assert_eq!(n_boxes, 2);
+    }
+
+    #[test]
+    fn all_emitted_ids_are_arm_namespaced() {
+        let spec = ArmSpec {
+            joints: vec![JointSpec::Revolute { axis: Vector3::z_axis(), limits: (-3.2, 3.2) }; 2],
+            link_offsets: vec![Isometry3::translation(0.0, 0.0, 0.1); 2],
+            gripper: GripperSpec { proximity_threshold: 0.02, max_grasp_size: 0.05 },
+        };
+        let state = ArmState::zeros(2);
+        let arm = Arm { spec, state, id: 0 };
+        let mut out = Vec::new();
+        arm.append_primitives(&mut out);
+        assert!(
+            out.iter().all(|(id, _)| matches!(id, EntityId::Arm { arm_id: 0, .. })),
+            "expected every emitted id to be EntityId::Arm; got {:?}",
+            out.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+        );
     }
 }
