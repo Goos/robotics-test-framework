@@ -2,6 +2,7 @@
 
 pub mod arm;
 pub mod fk;
+pub mod goals;
 pub mod ports;
 pub mod spec;
 pub mod state;
