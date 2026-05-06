@@ -65,35 +65,39 @@ fn shape_xy_contains(pose: Isometry3<f32>, shape: &Shape, xy: (f32, f32)) -> boo
 
 /// Per-tick gravity integration with snap-to-support (design v2 §5.5).
 ///
-/// Two-pass over Free objects to dodge the `objects_mut`/`find_support_beneath`
-/// alias borrow: (1) compute `(new_z, new_lin_vel_z)` for each Free object via
-/// `&self`; (2) for each, look up the highest support beneath. If the bottom
-/// has reached `top_z + SETTLE_EPSILON_M`, snap z to `top_z + half_height`,
-/// zero z-velocity, and transition to `Settled { on: support_id }`; otherwise
-/// commit the integrated state in place.
-///
-/// Iteration order is by ObjectId (BTreeMap); 6.3c may refine the tiebreak.
+/// Per-object processing in `(z ascending, id ascending)` order so that lower
+/// objects settle (or commit) before higher ones consider them as supports.
+/// `f32::total_cmp` handles NaN deterministically. For each Free object: read
+/// pose/vel/shape via `scene.object`; integrate; query `find_support_beneath`;
+/// if the bottom has reached `top_z + SETTLE_EPSILON_M`, snap z to
+/// `top_z + half_height`, zero z-velocity, and transition to
+/// `Settled { on: support_id }`; otherwise commit the integrated state.
 pub fn gravity_step(scene: &mut Scene, dt_ns: i64) {
     let dt_s = dt_ns as f32 / 1.0e9_f32;
 
-    // Phase 1: integrate Free objects (collect new states).
-    let mut updates: Vec<(ObjectId, f32, f32)> = Vec::new(); // (id, new_z, new_lin_vel_z)
-    for (id, obj) in scene.objects() {
-        if !matches!(obj.state, ObjectState::Free) { continue; }
-        let new_lin_vel_z = obj.lin_vel.z - GRAVITY_M_PER_S2 * dt_s;
-        let new_z = obj.pose.translation.z + new_lin_vel_z * dt_s;
-        updates.push((*id, new_z, new_lin_vel_z));
-    }
+    // Collect Free objects sorted by (z ascending, id ascending).
+    let mut free_ids: Vec<(ObjectId, f32)> = scene
+        .objects()
+        .filter(|(_, o)| matches!(o.state, ObjectState::Free))
+        .map(|(id, o)| (*id, o.pose.translation.z))
+        .collect();
+    free_ids.sort_by(|(id_a, z_a), (id_b, z_b)| {
+        z_a.total_cmp(z_b).then_with(|| id_a.0.cmp(&id_b.0))
+    });
 
-    // Phase 2: for each updated object, find support and either snap or commit.
-    for (id, new_z, new_lin_vel_z) in updates {
-        let (xy, half_height_z) = {
+    // Process each one: integrate, find support, snap or commit.
+    for (id, _z) in free_ids {
+        let (xy, half_height_z, cur_z, cur_lin_vel_z) = {
             let obj = scene.object(id).expect("object must exist");
             (
                 (obj.pose.translation.x, obj.pose.translation.y),
                 obj.shape.half_height_z(),
+                obj.pose.translation.z,
+                obj.lin_vel.z,
             )
         };
+        let new_lin_vel_z = cur_lin_vel_z - GRAVITY_M_PER_S2 * dt_s;
+        let new_z = cur_z + new_lin_vel_z * dt_s;
         let bottom_z = new_z - half_height_z;
         let support = find_support_beneath(scene, xy, new_z, Some(id));
         match support {
@@ -209,5 +213,42 @@ mod tests_support {
         assert!(matches!(o.state, ObjectState::Settled { .. }));
         let table_top_z = 0.5 + 0.01;
         assert!((o.pose.translation.z - (table_top_z + 0.05)).abs() < 1e-3);
+    }
+
+    #[test]
+    fn stack_on_stack_settles_correctly() {
+        use crate::object::{Object, ObjectId, ObjectState, SupportId};
+        use nalgebra::Isometry3;
+        let mut scene = Scene::with_ground(0);
+        scene.add_fixture(Fixture {
+            id: 0,
+            pose: Isometry3::translation(0.0, 0.0, 0.5),
+            shape: Shape::Aabb { half_extents: Vector3::new(0.5, 0.5, 0.01) },
+            is_support: true,
+        });
+        let bottom = ObjectId(1);
+        scene.insert_object(Object::new(
+            bottom,
+            Isometry3::translation(0.0, 0.0, 0.6),
+            Shape::Aabb { half_extents: Vector3::new(0.05, 0.05, 0.05) },
+            0.1,
+            true,
+        ));
+        let top = ObjectId(2);
+        scene.insert_object(Object::new(
+            top,
+            Isometry3::translation(0.0, 0.0, 1.0),
+            Shape::Aabb { half_extents: Vector3::new(0.05, 0.05, 0.05) },
+            0.1,
+            true,
+        ));
+        for _ in 0..2000 {
+            super::gravity_step(&mut scene, 1_000_000);
+        }
+        let top_obj = scene.object(top).unwrap();
+        let bottom_obj = scene.object(bottom).unwrap();
+        let bottom_top = bottom_obj.pose.translation.z + bottom_obj.shape.half_height_z();
+        assert!(matches!(top_obj.state, ObjectState::Settled { on: SupportId::Object(_) }));
+        assert!((top_obj.pose.translation.z - (bottom_top + top_obj.shape.half_height_z())).abs() < 1e-3);
     }
 }
