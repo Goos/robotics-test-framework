@@ -70,13 +70,11 @@ pub struct ArmWorld {
     next_port_id: u32,
     /// Filled by `attach_joint_encoder_sensor` (Step 3.8); drained in Step 3.11a.
     pub(crate) sensors_joint_encoder: BTreeMap<PortId, EncoderPublisher>,
-    /// Filled by Step 3.10 (`attach_ee_pose_sensor`); drained in Step 3.11b.
-    #[allow(dead_code)]
+    /// Filled by `attach_ee_pose_sensor` (Step 3.10); drained in Step 3.11b.
     pub(crate) sensors_ee_pose: BTreeMap<PortId, EePosePublisher>,
     /// Filled by `attach_joint_velocity_actuator` (Step 3.9); drained in Step 3.11c.
     pub(crate) actuators_joint_velocity: BTreeMap<PortId, JointVelocityConsumer>,
-    /// Filled by Step 3.10 (`attach_gripper_actuator`); drained in Step 3.11d.
-    #[allow(dead_code)]
+    /// Filled by `attach_gripper_actuator` (Step 3.10); drained in Step 3.11d.
     pub(crate) actuators_gripper: BTreeMap<PortId, GripperConsumer>,
 }
 
@@ -138,6 +136,30 @@ impl ArmWorld {
         self.actuators_joint_velocity.insert(port_id, JointVelocityConsumer { joint, rx });
         tx
     }
+
+    /// Register a gripper-command actuator. Returns the sender end; the world
+    /// retains the receiver and drains it during `consume_actuators` (Step 3.11d).
+    pub fn attach_gripper_actuator(&mut self) -> PortTx<GripperCommand> {
+        let (tx, rx) = rtf_core::port::port::<GripperCommand>();
+        let port_id = PortId(self.next_port_id);
+        self.next_port_id += 1;
+        self.actuators_gripper.insert(port_id, GripperConsumer { rx });
+        tx
+    }
+
+    /// Register an end-effector pose sensor publishing at `rate` Hz. Returns
+    /// the receiver end; the world retains the sender + scheduler and pushes
+    /// EE-pose readings during `publish_sensors` (Step 3.11b).
+    pub fn attach_ee_pose_sensor(&mut self, rate: RateHz) -> PortRx<EePoseReading> {
+        let (tx, rx) = rtf_core::port::port::<EePoseReading>();
+        let port_id = PortId(self.next_port_id);
+        self.next_port_id += 1;
+        self.sensors_ee_pose.insert(port_id, EePosePublisher {
+            tx,
+            scheduler: RateScheduler::new_hz(rate.0),
+        });
+        rx
+    }
 }
 
 #[cfg(test)]
@@ -186,5 +208,19 @@ mod tests {
         let mut world = ArmWorld::new(Scene::new(0), simple_spec(), true);
         let _tx = world.attach_joint_velocity_actuator(JointId(0));
         assert_eq!(world.actuators_joint_velocity.len(), 1);
+    }
+
+    #[test]
+    fn attach_gripper_returns_tx_and_registers_consumer() {
+        let mut world = ArmWorld::new(Scene::new(0), simple_spec(), true);
+        let _tx = world.attach_gripper_actuator();
+        assert_eq!(world.actuators_gripper.len(), 1);
+    }
+
+    #[test]
+    fn attach_ee_pose_returns_rx_and_registers_publisher() {
+        let mut world = ArmWorld::new(Scene::new(0), simple_spec(), true);
+        let _rx = world.attach_ee_pose_sensor(RateHz::new(100));
+        assert_eq!(world.sensors_ee_pose.len(), 1);
     }
 }
