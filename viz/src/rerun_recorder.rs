@@ -1,7 +1,6 @@
-//! Rerun recorder — gated on the `rerun` feature. Maps `Primitive` variants
-//! onto rerun archetypes, one entity path per `EntityId`. Steps 8.3a–d cover
-//! `Sphere`, `Box`, `Capsule`, and `Line`; the remaining `Label` variant
-//! lands in 8.3e.
+//! Rerun recorder — gated on the `rerun` feature. Maps each `Primitive`
+//! variant onto a rerun archetype, one entity path per `EntityId`. All five
+//! variants (`Sphere`, `Box`, `Capsule`, `Line`, `Label`) are covered.
 
 use rtf_sim::{
     primitive::{Primitive, SceneSnapshot},
@@ -84,7 +83,18 @@ impl Recorder for RerunRecorder {
                         &rerun::archetypes::LineStrips3D::new([vec![from_arr, to_arr]]),
                     );
                 }
-                _ => {}
+                Primitive::Label { pose, text, color: _ } => {
+                    let pos = [
+                        pose.translation.x,
+                        pose.translation.y,
+                        pose.translation.z,
+                    ];
+                    let _ = self.stream.log(
+                        path.as_str(),
+                        &rerun::archetypes::Points3D::new([pos])
+                            .with_labels([text.as_str()]),
+                    );
+                }
             }
         }
     }
@@ -158,6 +168,22 @@ mod tests {
                 Primitive::Line {
                     from: Point3::new(0.0, 0.0, 0.0),
                     to: Point3::new(1.0, 0.0, 0.0),
+                    color: Color::WHITE,
+                },
+            )],
+        });
+    }
+
+    #[test]
+    fn rerun_recorder_records_a_label() {
+        let mut rec = RerunRecorder::in_memory("test").unwrap();
+        rec.record(&SceneSnapshot {
+            t: Time::from_nanos(0),
+            items: vec![(
+                EntityId::Object(4),
+                Primitive::Label {
+                    pose: Isometry3::identity(),
+                    text: "block".to_string(),
                     color: Color::WHITE,
                 },
             )],
