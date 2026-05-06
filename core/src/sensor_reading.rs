@@ -27,14 +27,20 @@ mod tests {
     use super::*;
     use crate::time::Time;
 
-    struct Foo { sampled_at: Time }
+    struct Foo {
+        sampled_at: Time,
+    }
     impl SensorReading for Foo {
-        fn sampled_at(&self) -> Time { self.sampled_at }
+        fn sampled_at(&self) -> Time {
+            self.sampled_at
+        }
     }
 
     #[test]
     fn sample_timestamp_accessible() {
-        let r = Foo { sampled_at: Time::from_millis(42) };
+        let r = Foo {
+            sampled_at: Time::from_millis(42),
+        };
         assert_eq!(r.sampled_at(), Time::from_millis(42));
     }
 }

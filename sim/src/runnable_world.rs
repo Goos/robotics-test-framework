@@ -1,6 +1,9 @@
 use std::borrow::Cow;
 
-use rtf_core::{time::{Duration, Time}, world_view::WorldView};
+use rtf_core::{
+    time::{Duration, Time},
+    world_view::WorldView,
+};
 
 use crate::primitive::SceneSnapshot;
 
@@ -34,18 +37,31 @@ pub trait RunnableWorld: WorldView {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rtf_core::{time::{Time, Duration}, world_view::WorldView};
     use crate::primitive::SceneSnapshot;
+    use rtf_core::{
+        time::{Duration, Time},
+        world_view::WorldView,
+    };
 
-    struct EmptyWorld { t: Time }
+    struct EmptyWorld {
+        t: Time,
+    }
     impl WorldView for EmptyWorld {}
     impl RunnableWorld for EmptyWorld {
-        fn publish_sensors(&mut self) { /* no sensors */ }
+        fn publish_sensors(&mut self) { /* no sensors */
+        }
         fn consume_actuators_and_integrate(&mut self, dt: Duration) {
             self.t = self.t + dt;
         }
-        fn snapshot(&self) -> SceneSnapshot { SceneSnapshot { t: self.t, items: vec![] } }
-        fn time(&self) -> Time { self.t }
+        fn snapshot(&self) -> SceneSnapshot {
+            SceneSnapshot {
+                t: self.t,
+                items: vec![],
+            }
+        }
+        fn time(&self) -> Time {
+            self.t
+        }
     }
 
     #[test]

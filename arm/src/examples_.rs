@@ -124,10 +124,9 @@ where
         l1: f32,
         l2: f32,
     ) -> Self {
-        let block_r = (target_block_xy.0 * target_block_xy.0
-            + target_block_xy.1 * target_block_xy.1).sqrt();
-        let bin_r = (target_bin_xy.0 * target_bin_xy.0
-            + target_bin_xy.1 * target_bin_xy.1).sqrt();
+        let block_r =
+            (target_block_xy.0 * target_block_xy.0 + target_block_xy.1 * target_block_xy.1).sqrt();
+        let bin_r = (target_bin_xy.0 * target_bin_xy.0 + target_bin_xy.1 * target_bin_xy.1).sqrt();
         // Block top at z=0.55 (block center 0.525 + half-extent 0.025).
         // Park EE 0.85m up between maneuvers — safely above the bin top
         // (z=0.6) so the released block can fall into the bin.
@@ -156,7 +155,9 @@ where
         }
     }
 
-    pub fn state(&self) -> PickPlaceState { self.state }
+    pub fn state(&self) -> PickPlaceState {
+        self.state
+    }
 
     /// Read all joint encoders into a vector; entries default to 0.0 if a
     /// publisher hasn't fired yet (only relevant in tests).
@@ -192,7 +193,9 @@ where
             q_dot_target: q_dot_0,
         });
         for (i, target) in [(1usize, j1_target), (2usize, j2_target)] {
-            if i >= self.velocity_txs.len() { break; }
+            if i >= self.velocity_txs.len() {
+                break;
+            }
             let cur = qs.get(i).copied().unwrap_or(0.0);
             let q_dot = ((target - cur) * 4.0).clamp(-2.0, 2.0);
             self.velocity_txs[i].send(JointVelocityCommand {
@@ -214,8 +217,12 @@ where
     /// True iff `|q[1] - j1_target| < tol AND |q[2] - j2_target| < tol`.
     fn pitch_converged(&self, j1_target: f32, j2_target: f32) -> bool {
         let qs = self.joint_qs();
-        let j1_ok = qs.get(1).is_some_and(|q| (q - j1_target).abs() < self.joint_tol);
-        let j2_ok = qs.get(2).is_some_and(|q| (q - j2_target).abs() < self.joint_tol);
+        let j1_ok = qs
+            .get(1)
+            .is_some_and(|q| (q - j1_target).abs() < self.joint_tol);
+        let j2_ok = qs
+            .get(2)
+            .is_some_and(|q| (q - j2_target).abs() < self.joint_tol);
         j1_ok && j2_ok
     }
 }
@@ -226,7 +233,9 @@ where
     P: PortReader<EePoseReading>,
 {
     fn step(&mut self, _t: Time) -> Result<(), ControlError> {
-        let Some(yaw_err_block) = self.yaw_error(self.target_block_xy) else { return Ok(()); };
+        let Some(yaw_err_block) = self.yaw_error(self.target_block_xy) else {
+            return Ok(());
+        };
         let yaw_err_bin = self.yaw_error(self.target_bin_xy).unwrap_or(0.0);
         match self.state {
             PickPlaceState::ApproachYaw => {
@@ -337,11 +346,23 @@ mod pick_place_tests {
         }
         let (g_tx, g_rx) = port::<GripperCommand>();
         let c = PickPlace::new(
-            enc_rxs, ee_rx, vel_txs, g_tx,
-            (0.6, 0.0), (0.0, 0.6),
-            0.8, 0.4, 0.4,
+            enc_rxs,
+            ee_rx,
+            vel_txs,
+            g_tx,
+            (0.6, 0.0),
+            (0.0, 0.6),
+            0.8,
+            0.4,
+            0.4,
         );
-        Rig { c, enc_txs, ee_tx, _vel_rxs: vel_rxs, _g_rx: g_rx }
+        Rig {
+            c,
+            enc_txs,
+            ee_tx,
+            _vel_rxs: vel_rxs,
+            _g_rx: g_rx,
+        }
     }
 
     fn publish_encoders(rig: &Rig, qs: [f32; 3]) {

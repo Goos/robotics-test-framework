@@ -46,9 +46,18 @@ mod tests {
         use core::f32::consts::PI;
         use nalgebra::{Isometry3, Vector3};
         ArmSpec {
-            joints: vec![JointSpec::Revolute { axis: Vector3::z_axis(), limits: (-PI, PI) }; 2],
+            joints: vec![
+                JointSpec::Revolute {
+                    axis: Vector3::z_axis(),
+                    limits: (-PI, PI)
+                };
+                2
+            ],
             link_offsets: vec![Isometry3::translation(0.0, 0.0, 0.1); 2],
-            gripper: GripperSpec { proximity_threshold: 0.02, max_grasp_size: 0.05 },
+            gripper: GripperSpec {
+                proximity_threshold: 0.02,
+                max_grasp_size: 0.05,
+            },
         }
     }
 

@@ -12,7 +12,10 @@ pub struct Score {
 
 impl Score {
     pub fn new(value: f64) -> Self {
-        Self { value, breakdown: SmallVec::new() }
+        Self {
+            value,
+            breakdown: SmallVec::new(),
+        }
     }
 
     pub fn with_component(mut self, name: &'static str, value: f64) -> Self {

@@ -36,9 +36,18 @@ pub const BIN_FIXTURE_ID: u32 = 2;
 pub fn build_simple_arm_world(n_joints: usize) -> ArmWorld {
     use core::f32::consts::PI;
     let spec = ArmSpec {
-        joints: vec![JointSpec::Revolute { axis: Vector3::z_axis(), limits: (-PI, PI) }; n_joints],
+        joints: vec![
+            JointSpec::Revolute {
+                axis: Vector3::z_axis(),
+                limits: (-PI, PI)
+            };
+            n_joints
+        ],
         link_offsets: vec![Isometry3::translation(0.2, 0.0, 0.0); n_joints],
-        gripper: GripperSpec { proximity_threshold: 0.02, max_grasp_size: 0.05 },
+        gripper: GripperSpec {
+            proximity_threshold: 0.02,
+            max_grasp_size: 0.05,
+        },
     };
     ArmWorld::new(Scene::new(0), spec, /* gravity */ false)
 }
@@ -56,24 +65,32 @@ pub fn build_pick_and_place_world() -> ArmWorld {
     scene.add_fixture(Fixture {
         id: 0,
         pose: Isometry3::translation(0.5, 0.0, 0.475),
-        shape: Shape::Aabb { half_extents: Vector3::new(0.4, 0.4, 0.025) },
+        shape: Shape::Aabb {
+            half_extents: Vector3::new(0.4, 0.4, 0.025),
+        },
         is_support: true,
     });
 
     scene.add_fixture(Fixture {
         id: BIN_FIXTURE_ID,
         pose: Isometry3::translation(0.0, 0.6, 0.55),
-        shape: Shape::Aabb { half_extents: Vector3::new(0.1, 0.1, 0.05) },
+        shape: Shape::Aabb {
+            half_extents: Vector3::new(0.1, 0.1, 0.05),
+        },
         is_support: true,
     });
 
     scene.insert_object(Object {
         id: BLOCK_OBJECT_ID,
         pose: Isometry3::translation(0.6, 0.0, 0.525),
-        shape: Shape::Aabb { half_extents: Vector3::new(0.025, 0.025, 0.025) },
+        shape: Shape::Aabb {
+            half_extents: Vector3::new(0.025, 0.025, 0.025),
+        },
         mass: 0.1,
         graspable: true,
-        state: ObjectState::Settled { on: SupportId::Fixture(0) },
+        state: ObjectState::Settled {
+            on: SupportId::Fixture(0),
+        },
         lin_vel: Vector3::zeros(),
     });
 
@@ -84,23 +101,39 @@ pub fn build_pick_and_place_world() -> ArmWorld {
     // (~0.65 m from shoulder) are both well within reach.
     let spec = ArmSpec {
         joints: vec![
-            JointSpec::Revolute { axis: Vector3::z_axis(), limits: (-PI, PI) }, // J0 yaw
-            JointSpec::Revolute { axis: Vector3::y_axis(), limits: (-PI, PI) }, // J1 shoulder pitch
-            JointSpec::Revolute { axis: Vector3::y_axis(), limits: (-PI, PI) }, // J2 elbow pitch
+            JointSpec::Revolute {
+                axis: Vector3::z_axis(),
+                limits: (-PI, PI),
+            }, // J0 yaw
+            JointSpec::Revolute {
+                axis: Vector3::y_axis(),
+                limits: (-PI, PI),
+            }, // J1 shoulder pitch
+            JointSpec::Revolute {
+                axis: Vector3::y_axis(),
+                limits: (-PI, PI),
+            }, // J2 elbow pitch
         ],
         link_offsets: vec![
             Isometry3::translation(0.0, 0.0, 0.8), // pedestal — invariant under J0 yaw
             Isometry3::translation(0.4, 0.0, 0.0), // upper arm
             Isometry3::translation(0.4, 0.0, 0.0), // forearm
         ],
-        gripper: GripperSpec { proximity_threshold: 0.05, max_grasp_size: 0.1 },
+        gripper: GripperSpec {
+            proximity_threshold: 0.05,
+            max_grasp_size: 0.1,
+        },
     };
 
     ArmWorld::new(scene, spec, /* gravity */ true)
 }
 
-pub fn block_id(_world: &ArmWorld) -> ObjectId { BLOCK_OBJECT_ID }
-pub fn bin_id(_world: &ArmWorld) -> u32 { BIN_FIXTURE_ID }
+pub fn block_id(_world: &ArmWorld) -> ObjectId {
+    BLOCK_OBJECT_ID
+}
+pub fn bin_id(_world: &ArmWorld) -> u32 {
+    BIN_FIXTURE_ID
+}
 
 /// Bundle of every port the canonical PD + gripper controller needs:
 /// per-joint encoder receivers + velocity senders, plus a single gripper
@@ -128,7 +161,11 @@ impl ArmWorld {
             .map(|i| self.attach_joint_velocity_actuator(JointId(i as u32)))
             .collect();
         let gripper_tx = self.attach_gripper_actuator();
-        StandardArmPorts { encoder_rxs, velocity_txs, gripper_tx }
+        StandardArmPorts {
+            encoder_rxs,
+            velocity_txs,
+            gripper_tx,
+        }
     }
 }
 

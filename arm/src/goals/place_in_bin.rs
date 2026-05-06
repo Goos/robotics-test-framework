@@ -30,7 +30,9 @@ impl PlaceInBin {
 
 impl Goal<ArmWorld> for PlaceInBin {
     fn is_complete(&self, world: &ArmWorld) -> bool {
-        let Some(obj) = world.scene.object(self.target) else { return false; };
+        let Some(obj) = world.scene.object(self.target) else {
+            return false;
+        };
         matches!(
             obj.state,
             ObjectState::Settled { on: SupportId::Fixture(id) } if id == self.bin,
@@ -65,7 +67,9 @@ mod tests {
         let block = block_id(&world);
         let bin = bin_id(&world);
         let obj = world.scene.object_mut(block).unwrap();
-        obj.state = ObjectState::Settled { on: SupportId::Fixture(bin) };
+        obj.state = ObjectState::Settled {
+            on: SupportId::Fixture(bin),
+        };
         obj.pose.translation = Translation3::new(0.0, 0.5, 0.625);
         let goal = PlaceInBin::new(block, bin);
         assert!(goal.is_complete(&world));

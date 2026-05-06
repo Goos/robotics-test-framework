@@ -108,7 +108,9 @@ impl Scene {
         s.add_fixture(Fixture {
             id: u32::MAX,
             pose: Isometry3::translation(0.0, 0.0, -0.5),
-            shape: Shape::Aabb { half_extents: Vector3::new(1000.0, 1000.0, 0.5) },
+            shape: Shape::Aabb {
+                half_extents: Vector3::new(1000.0, 1000.0, 0.5),
+            },
             is_support: true,
         });
         s
@@ -122,7 +124,8 @@ impl Scene {
             id,
             Isometry3::translation(0.0, 0.0, 0.0),
             Shape::Sphere { radius: 0.01 },
-            0.1, true,
+            0.1,
+            true,
         );
         self.objects.insert(id, obj);
         id
@@ -156,7 +159,13 @@ mod tests {
         let mut s = Scene::new(0);
         let id = ObjectId(42);
         let pose = Isometry3::translation(1.0, 0.0, 0.0);
-        s.insert_object(Object::new(id, pose, Shape::Sphere { radius: 0.05 }, 0.1, true));
+        s.insert_object(Object::new(
+            id,
+            pose,
+            Shape::Sphere { radius: 0.05 },
+            0.1,
+            true,
+        ));
         assert!(s.object(id).is_some());
         s.object_mut(id).unwrap().mass = 0.2;
         assert_eq!(s.object(id).unwrap().mass, 0.2);

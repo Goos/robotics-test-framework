@@ -60,6 +60,10 @@ mod tests {
         let goal = PickObject::new(block);
         assert!(!goal.is_complete(&world));
         let s = goal.evaluate(&world).value;
-        assert!((0.0..1.0).contains(&s), "score should be in [0, 1) when not grasped, got {}", s);
+        assert!(
+            (0.0..1.0).contains(&s),
+            "score should be in [0, 1) when not grasped, got {}",
+            s
+        );
     }
 }

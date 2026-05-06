@@ -36,30 +36,28 @@ impl RerunRecorder {
 
 impl Recorder for RerunRecorder {
     fn record(&mut self, snapshot: &SceneSnapshot) {
-        self.stream.set_time_seconds(
-            "sim",
-            (snapshot.t.as_nanos() as f64) / 1.0e9_f64,
-        );
+        self.stream
+            .set_time_seconds("sim", (snapshot.t.as_nanos() as f64) / 1.0e9_f64);
         for (entity, prim) in &snapshot.items {
             let path = format!("{entity:?}");
             match prim {
-                Primitive::Sphere { pose, radius, color: _ } => {
-                    let pos = [
-                        pose.translation.x,
-                        pose.translation.y,
-                        pose.translation.z,
-                    ];
+                Primitive::Sphere {
+                    pose,
+                    radius,
+                    color: _,
+                } => {
+                    let pos = [pose.translation.x, pose.translation.y, pose.translation.z];
                     let _ = self.stream.log(
                         path.as_str(),
                         &rerun::archetypes::Points3D::new([pos]).with_radii([*radius]),
                     );
                 }
-                Primitive::Box { pose, half_extents, color: _ } => {
-                    let center = [
-                        pose.translation.x,
-                        pose.translation.y,
-                        pose.translation.z,
-                    ];
+                Primitive::Box {
+                    pose,
+                    half_extents,
+                    color: _,
+                } => {
+                    let center = [pose.translation.x, pose.translation.y, pose.translation.z];
                     let half_size = [half_extents.x, half_extents.y, half_extents.z];
                     let _ = self.stream.log(
                         path.as_str(),
@@ -69,7 +67,12 @@ impl Recorder for RerunRecorder {
                         ),
                     );
                 }
-                Primitive::Capsule { pose, half_height, radius, color: _ } => {
+                Primitive::Capsule {
+                    pose,
+                    half_height,
+                    radius,
+                    color: _,
+                } => {
                     // Fallback: render as two endpoint spheres + a connecting
                     // line (logged at a sub-path so it doesn't overwrite the
                     // points archetype). Rerun 0.21's
@@ -82,11 +85,8 @@ impl Recorder for RerunRecorder {
                     let p2 = pose.translation.vector - dir_z * (*half_height);
                     let _ = self.stream.log(
                         path.as_str(),
-                        &rerun::archetypes::Points3D::new([
-                            [p1.x, p1.y, p1.z],
-                            [p2.x, p2.y, p2.z],
-                        ])
-                        .with_radii([*radius, *radius]),
+                        &rerun::archetypes::Points3D::new([[p1.x, p1.y, p1.z], [p2.x, p2.y, p2.z]])
+                            .with_radii([*radius, *radius]),
                     );
                     let line_path = format!("{path}/link");
                     let _ = self.stream.log(
@@ -105,16 +105,15 @@ impl Recorder for RerunRecorder {
                         &rerun::archetypes::LineStrips3D::new([vec![from_arr, to_arr]]),
                     );
                 }
-                Primitive::Label { pose, text, color: _ } => {
-                    let pos = [
-                        pose.translation.x,
-                        pose.translation.y,
-                        pose.translation.z,
-                    ];
+                Primitive::Label {
+                    pose,
+                    text,
+                    color: _,
+                } => {
+                    let pos = [pose.translation.x, pose.translation.y, pose.translation.z];
                     let _ = self.stream.log(
                         path.as_str(),
-                        &rerun::archetypes::Points3D::new([pos])
-                            .with_labels([text.as_str()]),
+                        &rerun::archetypes::Points3D::new([pos]).with_labels([text.as_str()]),
                     );
                 }
             }
@@ -127,7 +126,10 @@ mod tests {
     use super::*;
     use nalgebra::Isometry3;
     use rtf_core::time::Time;
-    use rtf_sim::{entity::EntityId, primitive::{Color, Primitive, SceneSnapshot}};
+    use rtf_sim::{
+        entity::EntityId,
+        primitive::{Color, Primitive, SceneSnapshot},
+    };
 
     #[test]
     fn rerun_recorder_records_a_sphere() {

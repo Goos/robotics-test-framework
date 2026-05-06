@@ -30,7 +30,12 @@ pub struct PortRx<T> {
 /// (design §10.2); requiring `Send` would block useful non-`Send` payloads.
 pub fn port<T: Clone + 'static>() -> (PortTx<T>, PortRx<T>) {
     let slot = Rc::new(RefCell::new(None));
-    (PortTx { slot: Rc::clone(&slot) }, PortRx { slot })
+    (
+        PortTx {
+            slot: Rc::clone(&slot),
+        },
+        PortRx { slot },
+    )
 }
 
 impl<T> PortTx<T> {
@@ -79,7 +84,7 @@ mod tests {
     fn send_overwrites_then_latest_is_non_destructive() {
         let (tx, rx) = port::<i32>();
         tx.send(1);
-        tx.send(2);                       // overwrites 1
+        tx.send(2); // overwrites 1
         assert_eq!(rx.latest(), Some(2)); // peek
         assert_eq!(rx.latest(), Some(2)); // still there
     }
@@ -103,7 +108,9 @@ mod tests {
     fn port_rx_implements_port_reader_trait() {
         let (tx, mut rx) = port::<i32>();
         tx.send(42);
-        fn pull<R: PortReader<i32>>(r: &mut R) -> Option<i32> { r.take() }
+        fn pull<R: PortReader<i32>>(r: &mut R) -> Option<i32> {
+            r.take()
+        }
         assert_eq!(pull(&mut rx), Some(42));
 
         // Object-safety regression guard: PortReader<T> must stay dyn-compatible
@@ -117,7 +124,9 @@ mod tests {
         let (tx, rx) = port::<i32>();
         tx.send(42);
         let mut boxed: Box<dyn PortReader<i32>> = Box::new(rx);
-        fn pull<R: PortReader<i32>>(r: &mut R) -> Option<i32> { r.take() }
+        fn pull<R: PortReader<i32>>(r: &mut R) -> Option<i32> {
+            r.take()
+        }
         assert_eq!(pull(&mut boxed), Some(42));
     }
 }

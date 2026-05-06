@@ -17,7 +17,7 @@
 use rtf_arm::{
     examples_::PickPlace,
     goals::PlaceInBin,
-    test_helpers::{block_id, bin_id, build_pick_and_place_world},
+    test_helpers::{bin_id, block_id, build_pick_and_place_world},
     RateHz,
 };
 use rtf_core::time::Duration;
@@ -56,7 +56,8 @@ fn state_machine_picks_block_and_drops_in_bin() {
     assert!(
         matches!(res.terminated_by, Termination::GoalComplete),
         "did not converge in 15s; final score={}, terminated_by={:?}",
-        res.score.value, res.terminated_by,
+        res.score.value,
+        res.terminated_by,
     );
     assert!(res.score.value > 0.9);
 }
@@ -81,7 +82,9 @@ fn state_machine_picks_block_and_drops_in_bin_with_rerun() {
         ports.gripper_tx,
         (0.6, 0.0),
         (0.0, 0.6),
-        0.8, 0.4, 0.4,
+        0.8,
+        0.4,
+        0.4,
     );
     let goal = PlaceInBin::new(block, bin);
 
@@ -120,7 +123,9 @@ fn state_machine_picks_block_and_drops_in_bin_save_rrd() {
         ports.gripper_tx,
         (0.6, 0.0),
         (0.0, 0.6),
-        0.8, 0.4, 0.4,
+        0.8,
+        0.4,
+        0.4,
     );
     let goal = PlaceInBin::new(block, bin);
 

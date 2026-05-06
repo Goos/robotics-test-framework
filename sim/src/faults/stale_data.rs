@@ -5,12 +5,7 @@
 
 use std::rc::Rc;
 
-use rtf_core::{
-    clock::Clock,
-    port::PortReader,
-    sensor_reading::SensorReading,
-    time::Duration,
-};
+use rtf_core::{clock::Clock, port::PortReader, sensor_reading::SensorReading, time::Duration};
 
 pub struct StaleData<R: PortReader<T>, T: Clone + SensorReading> {
     inner: R,
@@ -84,12 +79,22 @@ mod tests {
         let (tx, rx) = port::<R>();
         let stale = StaleData::new(rx, Duration::from_millis(50), clock_dyn);
 
-        tx.send(R { sampled_at: Time::from_millis(0) });
+        tx.send(R {
+            sampled_at: Time::from_millis(0),
+        });
         raw_clock.advance(Duration::from_millis(60));
-        assert!(stale.latest().is_none(), "60ms-old reading should be stale (max_age=50ms)");
+        assert!(
+            stale.latest().is_none(),
+            "60ms-old reading should be stale (max_age=50ms)"
+        );
 
-        tx.send(R { sampled_at: Time::from_millis(60) });
-        assert!(stale.latest().is_some(), "fresh reading at sampled_at=now should pass");
+        tx.send(R {
+            sampled_at: Time::from_millis(60),
+        });
+        assert!(
+            stale.latest().is_some(),
+            "fresh reading at sampled_at=now should pass"
+        );
     }
 
     #[test]
@@ -99,7 +104,9 @@ mod tests {
         let (tx, rx) = port::<R>();
         let mut stale = StaleData::new(rx, Duration::from_millis(10), clock_dyn);
 
-        tx.send(R { sampled_at: Time::from_millis(0) });
+        tx.send(R {
+            sampled_at: Time::from_millis(0),
+        });
         raw_clock.advance(Duration::from_millis(10));
         // Boundary: age == max_age is NOT stale (strict inequality in is_stale).
         assert!(stale.take().is_some());

@@ -26,13 +26,23 @@ impl Visualizable for Fixture {
     fn append_primitives(&self, out: &mut Vec<(EntityId, Primitive)>) {
         let prim = match &self.shape {
             Shape::Sphere { radius } => Primitive::Sphere {
-                pose: self.pose, radius: *radius, color: Color::WHITE,
+                pose: self.pose,
+                radius: *radius,
+                color: Color::WHITE,
             },
             Shape::Aabb { half_extents } => Primitive::Box {
-                pose: self.pose, half_extents: *half_extents, color: Color::WHITE,
+                pose: self.pose,
+                half_extents: *half_extents,
+                color: Color::WHITE,
             },
-            Shape::Cylinder { radius, half_height } => Primitive::Capsule {
-                pose: self.pose, half_height: *half_height, radius: *radius, color: Color::WHITE,
+            Shape::Cylinder {
+                radius,
+                half_height,
+            } => Primitive::Capsule {
+                pose: self.pose,
+                half_height: *half_height,
+                radius: *radius,
+                color: Color::WHITE,
             },
         };
         out.push((EntityId::Fixture(self.id), prim));
@@ -42,17 +52,19 @@ impl Visualizable for Fixture {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nalgebra::{Isometry3, Vector3};
-    use crate::shape::Shape;
     use crate::primitive::Primitive;
+    use crate::shape::Shape;
     use crate::visualizable::Visualizable;
+    use nalgebra::{Isometry3, Vector3};
 
     #[test]
     fn fixture_appends_one_primitive_matching_shape() {
         let f = Fixture {
             id: 0,
             pose: Isometry3::translation(0.0, 0.0, 0.05),
-            shape: Shape::Aabb { half_extents: Vector3::new(0.5, 0.5, 0.05) },
+            shape: Shape::Aabb {
+                half_extents: Vector3::new(0.5, 0.5, 0.05),
+            },
             is_support: true,
         };
         let mut out = Vec::new();

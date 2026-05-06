@@ -14,7 +14,10 @@ pub enum EntityId {
     /// namespaces multiple arms; `slot` distinguishes parts within one arm.
     /// Kept separate from `Object`/`Fixture` so arm visuals never collide
     /// with sim-entity ids in the rerun entity tree.
-    Arm { arm_id: u32, slot: u32 },
+    Arm {
+        arm_id: u32,
+        slot: u32,
+    },
 }
 
 #[cfg(test)]

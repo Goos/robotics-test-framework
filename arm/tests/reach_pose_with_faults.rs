@@ -16,11 +16,7 @@ use rtf_arm::{
     test_helpers::build_simple_arm_world,
     world::RateHz,
 };
-use rtf_core::{
-    clock::Clock,
-    port::PortReader,
-    time::Duration,
-};
+use rtf_core::{clock::Clock, port::PortReader, time::Duration};
 use rtf_harness::{run, RunConfig, Termination};
 use rtf_sim::faults::{Delay, GaussianNoise};
 
@@ -62,11 +58,14 @@ fn pd_still_reaches_target_with_2ms_encoder_delay_and_noise() {
     let res = run(world, controller, goal, cfg);
     eprintln!(
         "e2e (faults): terminated_by={:?}, final_time_ns={}, score={}",
-        res.terminated_by, res.final_time.as_nanos(), res.score.value,
+        res.terminated_by,
+        res.final_time.as_nanos(),
+        res.score.value,
     );
     assert!(
         matches!(res.terminated_by, Termination::GoalComplete),
         "did not converge under faults; final score={}, terminated_by={:?}",
-        res.score.value, res.terminated_by,
+        res.score.value,
+        res.terminated_by,
     );
 }

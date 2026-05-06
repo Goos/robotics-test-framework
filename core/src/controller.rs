@@ -31,7 +31,9 @@ mod tests {
     use super::*;
     use crate::time::Time;
 
-    struct Counter { ticks: u32 }
+    struct Counter {
+        ticks: u32,
+    }
     impl Controller for Counter {
         fn step(&mut self, _t: Time) -> Result<(), ControlError> {
             self.ticks += 1;

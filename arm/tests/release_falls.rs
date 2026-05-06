@@ -28,7 +28,9 @@ fn object_grasped_then_released_falls_to_table() {
     scene.add_fixture(Fixture {
         id: 0,
         pose: Isometry3::translation(0.5, 0.0, 0.475),
-        shape: Shape::Aabb { half_extents: Vector3::new(0.4, 0.4, 0.025) },
+        shape: Shape::Aabb {
+            half_extents: Vector3::new(0.4, 0.4, 0.025),
+        },
         is_support: true,
     });
 
@@ -40,9 +42,18 @@ fn object_grasped_then_released_falls_to_table() {
     // ground at z=0.025 (sphere radius).
     use core::f32::consts::PI;
     let spec = ArmSpec {
-        joints: vec![JointSpec::Revolute { axis: Vector3::z_axis(), limits: (-PI, PI) }; 3],
+        joints: vec![
+            JointSpec::Revolute {
+                axis: Vector3::z_axis(),
+                limits: (-PI, PI)
+            };
+            3
+        ],
         link_offsets: vec![Isometry3::translation(0.2, 0.0, 0.0); 3],
-        gripper: GripperSpec { proximity_threshold: 0.5, max_grasp_size: 0.1 },
+        gripper: GripperSpec {
+            proximity_threshold: 0.5,
+            max_grasp_size: 0.1,
+        },
     };
 
     let block_id = ObjectId(99);
@@ -74,7 +85,11 @@ fn object_grasped_then_released_falls_to_table() {
     for _ in 0..195 {
         world.consume_actuators_and_integrate_inner(Duration::from_millis(1));
     }
-    assert_eq!(world.arm.state.grasped, Some(block_id), "should still be grasped");
+    assert_eq!(
+        world.arm.state.grasped,
+        Some(block_id),
+        "should still be grasped"
+    );
 
     // Phase 3: open gripper → release.
     g_tx.send(GripperCommand { close: false });

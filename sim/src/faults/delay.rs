@@ -120,7 +120,7 @@ mod tests {
         // pump now — release_time = 3 + 5 = 8ms.
         let _ = delayed.latest();
         raw_clock.advance(Duration::from_millis(2)); // now = 5ms; only entry 1 released.
-        // take() collapses to the most recent released entry — value 1.
+                                                     // take() collapses to the most recent released entry — value 1.
         assert_eq!(delayed.take(), Some(1));
         assert_eq!(delayed.take(), None);
         raw_clock.advance(Duration::from_millis(3)); // now = 8ms; entry 2 released.

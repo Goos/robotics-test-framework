@@ -19,7 +19,9 @@ pub struct FakeClock {
 
 impl FakeClock {
     pub fn new(start: Time) -> Self {
-        Self { now: Cell::new(start) }
+        Self {
+            now: Cell::new(start),
+        }
     }
 
     pub fn advance(&self, dt: Duration) {

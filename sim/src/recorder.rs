@@ -4,8 +4,16 @@ use crate::primitive::SceneSnapshot;
 /// Per design v2 §7: zero overhead in default builds; opt-in for replay/debug.
 #[cfg(feature = "controller_events")]
 pub enum ControllerEvent {
-    PortSend { port_id: rtf_core::PortId, t: rtf_core::Time, type_name: &'static str },
-    PortRecv { port_id: rtf_core::PortId, t: rtf_core::Time, type_name: &'static str },
+    PortSend {
+        port_id: rtf_core::PortId,
+        t: rtf_core::Time,
+        type_name: &'static str,
+    },
+    PortRecv {
+        port_id: rtf_core::PortId,
+        t: rtf_core::Time,
+        type_name: &'static str,
+    },
     ControllerError {
         t: rtf_core::Time,
         kind: rtf_core::ControlErrorKind,
@@ -36,12 +44,15 @@ impl Recorder for NullRecorder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rtf_core::time::Time;
     use crate::primitive::SceneSnapshot;
+    use rtf_core::time::Time;
     #[test]
     fn null_recorder_is_a_no_op() {
         let mut r = NullRecorder;
-        let snap = SceneSnapshot { t: Time::from_nanos(0), items: vec![] };
+        let snap = SceneSnapshot {
+            t: Time::from_nanos(0),
+            items: vec![],
+        };
         r.record(&snap);
     }
 }

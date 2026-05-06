@@ -30,7 +30,9 @@ mod tests {
     use nalgebra::Vector3;
     #[test]
     fn aabb_top_z() {
-        let s = Shape::Aabb { half_extents: Vector3::new(0.05, 0.05, 0.10) };
+        let s = Shape::Aabb {
+            half_extents: Vector3::new(0.05, 0.05, 0.10),
+        };
         assert!((s.half_height_z() - 0.10).abs() < 1e-9);
     }
     #[test]
@@ -40,7 +42,10 @@ mod tests {
     }
     #[test]
     fn cylinder_top_z() {
-        let s = Shape::Cylinder { radius: 0.02, half_height: 0.15 };
+        let s = Shape::Cylinder {
+            radius: 0.02,
+            half_height: 0.15,
+        };
         assert!((s.half_height_z() - 0.15).abs() < 1e-9);
     }
 }

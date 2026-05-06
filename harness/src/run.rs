@@ -30,8 +30,12 @@ where
     let deadline_time = Time::from_nanos(cfg.deadline.as_nanos());
 
     let terminated_by = loop {
-        if world.time() >= deadline_time { break Termination::Deadline; }
-        if goal.is_complete(&world) { break Termination::GoalComplete; }
+        if world.time() >= deadline_time {
+            break Termination::Deadline;
+        }
+        if goal.is_complete(&world) {
+            break Termination::GoalComplete;
+        }
 
         world.publish_sensors();
         cfg.recorder.record(&world.snapshot());
@@ -70,21 +74,36 @@ mod tests {
 
     use crate::types::{RunConfig, Termination};
 
-    struct W { t: Time }
+    struct W {
+        t: Time,
+    }
     impl WorldView for W {}
     impl RunnableWorld for W {
         fn publish_sensors(&mut self) {}
-        fn consume_actuators_and_integrate(&mut self, dt: Duration) { self.t = self.t + dt; }
-        fn snapshot(&self) -> SceneSnapshot { SceneSnapshot { t: self.t, items: vec![] } }
-        fn time(&self) -> Time { self.t }
+        fn consume_actuators_and_integrate(&mut self, dt: Duration) {
+            self.t = self.t + dt;
+        }
+        fn snapshot(&self) -> SceneSnapshot {
+            SceneSnapshot {
+                t: self.t,
+                items: vec![],
+            }
+        }
+        fn time(&self) -> Time {
+            self.t
+        }
     }
     struct Noop;
     impl Controller for Noop {
-        fn step(&mut self, _: Time) -> Result<(), ControlError> { Ok(()) }
+        fn step(&mut self, _: Time) -> Result<(), ControlError> {
+            Ok(())
+        }
     }
     struct AlwaysHalf;
     impl Goal<W> for AlwaysHalf {
-        fn evaluate(&self, _: &W) -> Score { Score::new(0.5) }
+        fn evaluate(&self, _: &W) -> Score {
+            Score::new(0.5)
+        }
     }
 
     #[test]
@@ -108,8 +127,12 @@ mod tests {
     fn run_terminates_on_goal_complete_before_deadline() {
         struct DoneAt(Time);
         impl Goal<W> for DoneAt {
-            fn is_complete(&self, w: &W) -> bool { w.time() >= self.0 }
-            fn evaluate(&self, _: &W) -> Score { Score::new(1.0) }
+            fn is_complete(&self, w: &W) -> bool {
+                w.time() >= self.0
+            }
+            fn evaluate(&self, _: &W) -> Score {
+                Score::new(1.0)
+            }
         }
         let cfg = RunConfig::default().with_deadline(Duration::from_millis(10));
         let res = run(W { t: Time::ZERO }, Noop, DoneAt(Time::from_millis(3)), cfg);
@@ -119,13 +142,15 @@ mod tests {
 
     #[test]
     fn recorder_is_called_once_per_tick() {
+        use rtf_sim::recorder::Recorder;
         use std::cell::Cell;
         use std::rc::Rc;
-        use rtf_sim::recorder::Recorder;
 
         struct Counter(Rc<Cell<u32>>);
         impl Recorder for Counter {
-            fn record(&mut self, _: &SceneSnapshot) { self.0.set(self.0.get() + 1); }
+            fn record(&mut self, _: &SceneSnapshot) {
+                self.0.set(self.0.get() + 1);
+            }
         }
 
         let counter = Rc::new(Cell::new(0u32));

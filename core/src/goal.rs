@@ -6,7 +6,9 @@ use crate::{score::Score, time::Time, world_view::WorldView};
 /// only required method; the others have sensible defaults.
 pub trait Goal<W: WorldView> {
     fn tick(&mut self, _t: Time, _world: &W) {}
-    fn is_complete(&self, _world: &W) -> bool { false }
+    fn is_complete(&self, _world: &W) -> bool {
+        false
+    }
     fn evaluate(&self, world: &W) -> Score;
 }
 
@@ -18,7 +20,9 @@ mod tests {
     impl WorldView for W {}
     struct AlwaysOne;
     impl Goal<W> for AlwaysOne {
-        fn evaluate(&self, _w: &W) -> Score { Score::new(1.0) }
+        fn evaluate(&self, _w: &W) -> Score {
+            Score::new(1.0)
+        }
     }
     #[test]
     fn defaults_for_tick_and_is_complete() {

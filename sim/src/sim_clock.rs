@@ -1,6 +1,9 @@
 use core::cell::Cell;
 
-use rtf_core::{clock::Clock, time::{Duration, Time}};
+use rtf_core::{
+    clock::Clock,
+    time::{Duration, Time},
+};
 
 /// Sim-driven clock backed by `Cell<Time>` (single-threaded; safe).
 /// Use `advance(dt)` to step time; `harness::run` will own this and tick it
@@ -11,7 +14,9 @@ pub struct SimClock {
 
 impl SimClock {
     pub fn new() -> Self {
-        Self { now: Cell::new(Time::ZERO) }
+        Self {
+            now: Cell::new(Time::ZERO),
+        }
     }
 
     pub fn advance(&self, dt: Duration) {
@@ -20,7 +25,9 @@ impl SimClock {
 }
 
 impl Default for SimClock {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Clock for SimClock {
@@ -33,7 +40,7 @@ impl Clock for SimClock {
 mod tests {
     use super::*;
     use rtf_core::clock::Clock;
-    use rtf_core::time::{Time, Duration};
+    use rtf_core::time::{Duration, Time};
     #[test]
     fn sim_clock_advances_via_advance() {
         let c = SimClock::new();

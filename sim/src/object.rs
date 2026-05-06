@@ -50,9 +50,19 @@ pub struct Object {
 }
 
 impl Object {
-    pub fn new(id: ObjectId, pose: Isometry3<f32>, shape: Shape, mass: f32, graspable: bool) -> Self {
+    pub fn new(
+        id: ObjectId,
+        pose: Isometry3<f32>,
+        shape: Shape,
+        mass: f32,
+        graspable: bool,
+    ) -> Self {
         Self {
-            id, pose, shape, mass, graspable,
+            id,
+            pose,
+            shape,
+            mass,
+            graspable,
             state: ObjectState::Free,
             lin_vel: Vector3::zeros(),
         }
@@ -63,13 +73,23 @@ impl Visualizable for Object {
     fn append_primitives(&self, out: &mut Vec<(EntityId, Primitive)>) {
         let prim = match &self.shape {
             Shape::Sphere { radius } => Primitive::Sphere {
-                pose: self.pose, radius: *radius, color: Color::WHITE,
+                pose: self.pose,
+                radius: *radius,
+                color: Color::WHITE,
             },
             Shape::Aabb { half_extents } => Primitive::Box {
-                pose: self.pose, half_extents: *half_extents, color: Color::WHITE,
+                pose: self.pose,
+                half_extents: *half_extents,
+                color: Color::WHITE,
             },
-            Shape::Cylinder { radius, half_height } => Primitive::Capsule {
-                pose: self.pose, half_height: *half_height, radius: *radius, color: Color::WHITE,
+            Shape::Cylinder {
+                radius,
+                half_height,
+            } => Primitive::Capsule {
+                pose: self.pose,
+                half_height: *half_height,
+                radius: *radius,
+                color: Color::WHITE,
             },
         };
         out.push((EntityId::Object(self.id.0), prim));
@@ -96,10 +116,16 @@ mod tests {
     #[test]
     fn object_appends_one_primitive_matching_shape() {
         use super::*;
-        use nalgebra::Isometry3;
         use crate::primitive::Primitive;
         use crate::visualizable::Visualizable;
-        let o = Object::new(ObjectId(1), Isometry3::identity(), Shape::Sphere{radius:0.05}, 0.1, true);
+        use nalgebra::Isometry3;
+        let o = Object::new(
+            ObjectId(1),
+            Isometry3::identity(),
+            Shape::Sphere { radius: 0.05 },
+            0.1,
+            true,
+        );
         let mut out = Vec::new();
         o.append_primitives(&mut out);
         assert_eq!(out.len(), 1);

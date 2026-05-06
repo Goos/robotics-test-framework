@@ -20,7 +20,9 @@ pub struct JointEncoderReading {
 }
 
 impl SensorReading for JointEncoderReading {
-    fn sampled_at(&self) -> Time { self.sampled_at }
+    fn sampled_at(&self) -> Time {
+        self.sampled_at
+    }
 }
 
 impl Noise for JointEncoderReading {
@@ -39,7 +41,9 @@ pub struct EePoseReading {
 }
 
 impl SensorReading for EePoseReading {
-    fn sampled_at(&self) -> Time { self.sampled_at }
+    fn sampled_at(&self) -> Time {
+        self.sampled_at
+    }
 }
 
 /// Per-joint velocity-command actuator input (design v2 §5.6).
@@ -76,7 +80,10 @@ mod tests {
     #[test]
     fn joint_encoder_reading_exposes_sample_time() {
         let r = JointEncoderReading {
-            joint: JointId(0), q: 0.5, q_dot: 0.1, sampled_at: Time::from_millis(7),
+            joint: JointId(0),
+            q: 0.5,
+            q_dot: 0.1,
+            sampled_at: Time::from_millis(7),
         };
         assert_eq!(r.sampled_at(), Time::from_millis(7));
     }
@@ -86,7 +93,10 @@ mod tests {
         let draws = vec![1.5_f32, -2.0_f32];
         let mut source = FixedSource(draws.into_iter());
         let mut r = JointEncoderReading {
-            joint: JointId(0), q: 1.0, q_dot: 0.0, sampled_at: Time::from_nanos(0),
+            joint: JointId(0),
+            q: 1.0,
+            q_dot: 0.0,
+            sampled_at: Time::from_nanos(0),
         };
         r.apply_noise(&mut source as &mut dyn NoiseSource, 0.01);
         // q gets the first draw (1.5), q_dot gets the second (-2.0); both

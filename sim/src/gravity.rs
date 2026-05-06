@@ -34,17 +34,27 @@ pub fn find_support_beneath(
 ) -> Option<(SupportId, f32)> {
     let mut best: Option<(SupportId, f32)> = None;
     for (id, fix) in scene.fixtures() {
-        if !fix.is_support { continue; }
-        if !shape_xy_contains(fix.pose, &fix.shape, xy) { continue; }
+        if !fix.is_support {
+            continue;
+        }
+        if !shape_xy_contains(fix.pose, &fix.shape, xy) {
+            continue;
+        }
         let top_z = fix.pose.translation.z + fix.shape.half_height_z();
         if top_z <= z_above && best.is_none_or(|(_, z)| top_z > z) {
             best = Some((SupportId::Fixture(*id), top_z));
         }
     }
     for (id, obj) in scene.objects() {
-        if Some(*id) == ignore { continue; }
-        if !matches!(obj.state, ObjectState::Settled { .. }) { continue; }
-        if !shape_xy_contains(obj.pose, &obj.shape, xy) { continue; }
+        if Some(*id) == ignore {
+            continue;
+        }
+        if !matches!(obj.state, ObjectState::Settled { .. }) {
+            continue;
+        }
+        if !shape_xy_contains(obj.pose, &obj.shape, xy) {
+            continue;
+        }
         let top_z = obj.pose.translation.z + obj.shape.half_height_z();
         if top_z <= z_above && best.is_none_or(|(_, z)| top_z > z) {
             best = Some((SupportId::Object(id.0), top_z));
@@ -72,14 +82,17 @@ fn shape_xy_contains(pose: Isometry3<f32>, shape: &Shape, xy: (f32, f32)) -> boo
 pub fn reevaluate_settled(scene: &mut Scene) {
     let mut to_free: Vec<ObjectId> = Vec::new();
     for (id, obj) in scene.objects() {
-        let ObjectState::Settled { on } = obj.state else { continue };
+        let ObjectState::Settled { on } = obj.state else {
+            continue;
+        };
         if !scene.has_support(on) {
             to_free.push(*id);
             continue;
         }
         let xy = (obj.pose.translation.x, obj.pose.translation.y);
         // Re-check: does the chosen support still own our xy column?
-        let support_check = find_support_beneath(scene, xy, obj.pose.translation.z + 1.0, Some(*id));
+        let support_check =
+            find_support_beneath(scene, xy, obj.pose.translation.z + 1.0, Some(*id));
         if support_check.is_none_or(|(s, _)| s != on) {
             to_free.push(*id);
         }
@@ -111,9 +124,8 @@ pub fn gravity_step(scene: &mut Scene, dt_ns: i64) {
         .filter(|(_, o)| matches!(o.state, ObjectState::Free))
         .map(|(id, o)| (*id, o.pose.translation.z))
         .collect();
-    free_ids.sort_by(|(id_a, z_a), (id_b, z_b)| {
-        z_a.total_cmp(z_b).then_with(|| id_a.0.cmp(&id_b.0))
-    });
+    free_ids
+        .sort_by(|(id_a, z_a), (id_b, z_b)| z_a.total_cmp(z_b).then_with(|| id_a.0.cmp(&id_b.0)));
 
     // Process each one: integrate, find support, snap or commit.
     for (id, _z) in free_ids {
@@ -177,7 +189,9 @@ mod tests_support {
         let table_id = scene.add_fixture(Fixture {
             id: 0,
             pose: Isometry3::translation(0.0, 0.0, 0.05),
-            shape: Shape::Aabb { half_extents: Vector3::new(0.5, 0.5, 0.05) },
+            shape: Shape::Aabb {
+                half_extents: Vector3::new(0.5, 0.5, 0.05),
+            },
             is_support: true,
         });
         let support = find_support_beneath(&scene, (0.0, 0.0), 1.0, None);
@@ -190,7 +204,9 @@ mod tests_support {
         scene.add_fixture(Fixture {
             id: 0,
             pose: Isometry3::translation(0.0, 0.0, 0.05),
-            shape: Shape::Aabb { half_extents: Vector3::new(0.1, 0.1, 0.05) },
+            shape: Shape::Aabb {
+                half_extents: Vector3::new(0.1, 0.1, 0.05),
+            },
             is_support: true,
         });
         let support = find_support_beneath(&scene, (5.0, 5.0), 1.0, None);
@@ -216,7 +232,8 @@ mod tests_support {
         assert!(
             z_after < z_before,
             "object should have fallen; z_before={}, z_after={}",
-            z_before, z_after,
+            z_before,
+            z_after,
         );
     }
 
@@ -228,7 +245,9 @@ mod tests_support {
         let _table = scene.add_fixture(Fixture {
             id: 0,
             pose: Isometry3::translation(0.0, 0.0, 0.5),
-            shape: Shape::Aabb { half_extents: Vector3::new(0.2, 0.2, 0.01) },
+            shape: Shape::Aabb {
+                half_extents: Vector3::new(0.2, 0.2, 0.01),
+            },
             is_support: true,
         });
         let id = ObjectId(1);
@@ -256,7 +275,9 @@ mod tests_support {
         let table = scene.add_fixture(Fixture {
             id: 0,
             pose: Isometry3::translation(0.0, 0.0, 0.5),
-            shape: Shape::Aabb { half_extents: Vector3::new(0.5, 0.5, 0.01) },
+            shape: Shape::Aabb {
+                half_extents: Vector3::new(0.5, 0.5, 0.01),
+            },
             is_support: true,
         });
         let id = ObjectId(1);
@@ -268,7 +289,10 @@ mod tests_support {
             true,
         ));
         super::gravity_step(&mut scene, 1_000_000);
-        assert!(matches!(scene.object(id).unwrap().state, ObjectState::Settled { .. }));
+        assert!(matches!(
+            scene.object(id).unwrap().state,
+            ObjectState::Settled { .. }
+        ));
         scene.remove_fixture(table);
         super::reevaluate_settled(&mut scene);
         assert!(matches!(scene.object(id).unwrap().state, ObjectState::Free));
@@ -282,14 +306,18 @@ mod tests_support {
         scene.add_fixture(Fixture {
             id: 0,
             pose: Isometry3::translation(0.0, 0.0, 0.5),
-            shape: Shape::Aabb { half_extents: Vector3::new(0.5, 0.5, 0.01) },
+            shape: Shape::Aabb {
+                half_extents: Vector3::new(0.5, 0.5, 0.01),
+            },
             is_support: true,
         });
         let bottom = ObjectId(1);
         scene.insert_object(Object::new(
             bottom,
             Isometry3::translation(0.0, 0.0, 0.6),
-            Shape::Aabb { half_extents: Vector3::new(0.05, 0.05, 0.05) },
+            Shape::Aabb {
+                half_extents: Vector3::new(0.05, 0.05, 0.05),
+            },
             0.1,
             true,
         ));
@@ -297,7 +325,9 @@ mod tests_support {
         scene.insert_object(Object::new(
             top,
             Isometry3::translation(0.0, 0.0, 1.0),
-            Shape::Aabb { half_extents: Vector3::new(0.05, 0.05, 0.05) },
+            Shape::Aabb {
+                half_extents: Vector3::new(0.05, 0.05, 0.05),
+            },
             0.1,
             true,
         ));
@@ -307,7 +337,15 @@ mod tests_support {
         let top_obj = scene.object(top).unwrap();
         let bottom_obj = scene.object(bottom).unwrap();
         let bottom_top = bottom_obj.pose.translation.z + bottom_obj.shape.half_height_z();
-        assert!(matches!(top_obj.state, ObjectState::Settled { on: SupportId::Object(_) }));
-        assert!((top_obj.pose.translation.z - (bottom_top + top_obj.shape.half_height_z())).abs() < 1e-3);
+        assert!(matches!(
+            top_obj.state,
+            ObjectState::Settled {
+                on: SupportId::Object(_)
+            }
+        ));
+        assert!(
+            (top_obj.pose.translation.z - (bottom_top + top_obj.shape.half_height_z())).abs()
+                < 1e-3
+        );
     }
 }

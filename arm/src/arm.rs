@@ -46,16 +46,19 @@ impl Visualizable for Arm {
             } else {
                 UnitQuaternion::identity()
             };
-            let mid = acc * Isometry3::from_parts(
-                Translation3::from(link_vec / 2.0),
-                z_to_link,
-            );
-            out.push((EntityId::Arm { arm_id: self.id, slot: i as u32 }, Primitive::Capsule {
-                pose: mid,
-                half_height,
-                radius: LINK_RADIUS,
-                color: Color::WHITE,
-            }));
+            let mid = acc * Isometry3::from_parts(Translation3::from(link_vec / 2.0), z_to_link);
+            out.push((
+                EntityId::Arm {
+                    arm_id: self.id,
+                    slot: i as u32,
+                },
+                Primitive::Capsule {
+                    pose: mid,
+                    half_height,
+                    radius: LINK_RADIUS,
+                    color: Color::WHITE,
+                },
+            ));
             acc *= link_offset;
         }
         // Articulated gripper: two finger pillars whose lateral separation
@@ -67,15 +70,22 @@ impl Visualizable for Arm {
             FINGER_OPEN_SEPARATION
         };
         for (slot, sign) in [(998, 1.0_f32), (999, -1.0_f32)] {
-            let finger_pose = acc * Isometry3::from_parts(
-                Translation3::new(0.0, sign * separation, FINGER_FORWARD_OFFSET),
-                UnitQuaternion::identity(),
-            );
-            out.push((EntityId::Arm { arm_id: self.id, slot }, Primitive::Box {
-                pose: finger_pose,
-                half_extents: FINGER_HALF_EXTENTS,
-                color: Color::RED,
-            }));
+            let finger_pose = acc
+                * Isometry3::from_parts(
+                    Translation3::new(0.0, sign * separation, FINGER_FORWARD_OFFSET),
+                    UnitQuaternion::identity(),
+                );
+            out.push((
+                EntityId::Arm {
+                    arm_id: self.id,
+                    slot,
+                },
+                Primitive::Box {
+                    pose: finger_pose,
+                    half_extents: FINGER_HALF_EXTENTS,
+                    color: Color::RED,
+                },
+            ));
         }
     }
 }
@@ -92,16 +102,31 @@ mod tests {
     #[test]
     fn appends_n_capsules_and_two_finger_boxes() {
         let spec = ArmSpec {
-            joints: vec![JointSpec::Revolute { axis: Vector3::z_axis(), limits: (-3.2, 3.2) }; 3],
+            joints: vec![
+                JointSpec::Revolute {
+                    axis: Vector3::z_axis(),
+                    limits: (-3.2, 3.2)
+                };
+                3
+            ],
             link_offsets: vec![Isometry3::translation(0.0, 0.0, 0.1); 3],
-            gripper: GripperSpec { proximity_threshold: 0.02, max_grasp_size: 0.05 },
+            gripper: GripperSpec {
+                proximity_threshold: 0.02,
+                max_grasp_size: 0.05,
+            },
         };
         let state = ArmState::zeros(3);
         let arm = Arm { spec, state, id: 0 };
         let mut out = Vec::new();
         arm.append_primitives(&mut out);
-        let n_capsules = out.iter().filter(|(_, p)| matches!(p, Primitive::Capsule { .. })).count();
-        let n_boxes = out.iter().filter(|(_, p)| matches!(p, Primitive::Box { .. })).count();
+        let n_capsules = out
+            .iter()
+            .filter(|(_, p)| matches!(p, Primitive::Capsule { .. }))
+            .count();
+        let n_boxes = out
+            .iter()
+            .filter(|(_, p)| matches!(p, Primitive::Box { .. }))
+            .count();
         assert_eq!(n_capsules, 3);
         assert_eq!(n_boxes, 2);
     }
@@ -109,16 +134,26 @@ mod tests {
     #[test]
     fn all_emitted_ids_are_arm_namespaced() {
         let spec = ArmSpec {
-            joints: vec![JointSpec::Revolute { axis: Vector3::z_axis(), limits: (-3.2, 3.2) }; 2],
+            joints: vec![
+                JointSpec::Revolute {
+                    axis: Vector3::z_axis(),
+                    limits: (-3.2, 3.2)
+                };
+                2
+            ],
             link_offsets: vec![Isometry3::translation(0.0, 0.0, 0.1); 2],
-            gripper: GripperSpec { proximity_threshold: 0.02, max_grasp_size: 0.05 },
+            gripper: GripperSpec {
+                proximity_threshold: 0.02,
+                max_grasp_size: 0.05,
+            },
         };
         let state = ArmState::zeros(2);
         let arm = Arm { spec, state, id: 0 };
         let mut out = Vec::new();
         arm.append_primitives(&mut out);
         assert!(
-            out.iter().all(|(id, _)| matches!(id, EntityId::Arm { arm_id: 0, .. })),
+            out.iter()
+                .all(|(id, _)| matches!(id, EntityId::Arm { arm_id: 0, .. })),
             "expected every emitted id to be EntityId::Arm; got {:?}",
             out.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
         );

@@ -38,7 +38,11 @@ mod tests {
         let mut sched = RateScheduler::new_hz(333);
         let dt_ns = 1_000_000_i64; // 1 ms
         let mut fires: i32 = 0;
-        for _ in 0..1_000 { if sched.tick(dt_ns) { fires += 1; } }
+        for _ in 0..1_000 {
+            if sched.tick(dt_ns) {
+                fires += 1;
+            }
+        }
         assert!((fires - 333).abs() <= 1, "got {} fires", fires);
     }
 
@@ -47,7 +51,11 @@ mod tests {
         let mut sched = RateScheduler::new_hz(100);
         let dt_ns = 1_000_000_i64;
         let mut fires: i32 = 0;
-        for _ in 0..1_000 { if sched.tick(dt_ns) { fires += 1; } }
+        for _ in 0..1_000 {
+            if sched.tick(dt_ns) {
+                fires += 1;
+            }
+        }
         assert_eq!(fires, 100);
     }
 }

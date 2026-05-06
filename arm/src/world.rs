@@ -21,7 +21,9 @@ use crate::state::ArmState;
 pub struct RateHz(pub u32);
 
 impl RateHz {
-    pub fn new(hz: u32) -> Self { RateHz(hz) }
+    pub fn new(hz: u32) -> Self {
+        RateHz(hz)
+    }
 }
 
 /// Per-joint encoder publisher: the channel sender, the joint it samples,
@@ -88,7 +90,11 @@ impl ArmWorld {
         let n = spec.joints.len();
         Self {
             scene,
-            arm: Arm { spec, state: ArmState::zeros(n), id: 0 },
+            arm: Arm {
+                spec,
+                state: ArmState::zeros(n),
+                id: 0,
+            },
             gravity_enabled,
             sim_time: Time::ZERO,
             last_publish_time: Time::ZERO,
@@ -101,7 +107,9 @@ impl ArmWorld {
         }
     }
 
-    pub fn time(&self) -> Time { self.sim_time }
+    pub fn time(&self) -> Time {
+        self.sim_time
+    }
 
     /// Current end-effector world-frame pose, computed via forward kinematics
     /// from the arm's spec and joint state. Used by `publish_sensors` and by
@@ -128,11 +136,14 @@ impl ArmWorld {
         let (tx, rx) = rtf_core::port::port::<JointEncoderReading>();
         let port_id = PortId(self.next_port_id);
         self.next_port_id += 1;
-        self.sensors_joint_encoder.insert(port_id, EncoderPublisher {
-            joint,
-            tx,
-            scheduler: RateScheduler::new_hz(rate.0),
-        });
+        self.sensors_joint_encoder.insert(
+            port_id,
+            EncoderPublisher {
+                joint,
+                tx,
+                scheduler: RateScheduler::new_hz(rate.0),
+            },
+        );
         rx
     }
 
@@ -146,7 +157,8 @@ impl ArmWorld {
         let (tx, rx) = rtf_core::port::port::<JointVelocityCommand>();
         let port_id = PortId(self.next_port_id);
         self.next_port_id += 1;
-        self.actuators_joint_velocity.insert(port_id, JointVelocityConsumer { joint, rx });
+        self.actuators_joint_velocity
+            .insert(port_id, JointVelocityConsumer { joint, rx });
         tx
     }
 
@@ -156,7 +168,8 @@ impl ArmWorld {
         let (tx, rx) = rtf_core::port::port::<GripperCommand>();
         let port_id = PortId(self.next_port_id);
         self.next_port_id += 1;
-        self.actuators_gripper.insert(port_id, GripperConsumer { rx });
+        self.actuators_gripper
+            .insert(port_id, GripperConsumer { rx });
         tx
     }
 
@@ -167,10 +180,13 @@ impl ArmWorld {
         let (tx, rx) = rtf_core::port::port::<EePoseReading>();
         let port_id = PortId(self.next_port_id);
         self.next_port_id += 1;
-        self.sensors_ee_pose.insert(port_id, EePosePublisher {
-            tx,
-            scheduler: RateScheduler::new_hz(rate.0),
-        });
+        self.sensors_ee_pose.insert(
+            port_id,
+            EePosePublisher {
+                tx,
+                scheduler: RateScheduler::new_hz(rate.0),
+            },
+        );
         rx
     }
 
@@ -262,8 +278,12 @@ impl ArmWorld {
             let threshold = self.arm.spec.gripper.proximity_threshold;
             let arm_id = self.arm.id;
             let to_grasp = self.scene.objects().find_map(|(id, obj)| {
-                if !obj.graspable { return None; }
-                if matches!(obj.state, rtf_sim::object::ObjectState::Grasped { .. }) { return None; }
+                if !obj.graspable {
+                    return None;
+                }
+                if matches!(obj.state, rtf_sim::object::ObjectState::Grasped { .. }) {
+                    return None;
+                }
                 let dist = (obj.pose.translation.vector - ee.translation.vector).norm();
                 (dist <= threshold).then_some(*id)
             });
@@ -340,13 +360,22 @@ impl rtf_sim::runnable_world::RunnableWorld for ArmWorld {
     fn snapshot(&self) -> rtf_sim::primitive::SceneSnapshot {
         use rtf_sim::visualizable::Visualizable;
         let mut items = Vec::new();
-        for (_, fix) in self.scene.fixtures() { fix.append_primitives(&mut items); }
-        for (_, obj) in self.scene.objects() { obj.append_primitives(&mut items); }
+        for (_, fix) in self.scene.fixtures() {
+            fix.append_primitives(&mut items);
+        }
+        for (_, obj) in self.scene.objects() {
+            obj.append_primitives(&mut items);
+        }
         self.arm.append_primitives(&mut items);
-        rtf_sim::primitive::SceneSnapshot { t: self.sim_time, items }
+        rtf_sim::primitive::SceneSnapshot {
+            t: self.sim_time,
+            items,
+        }
     }
 
-    fn time(&self) -> Time { self.sim_time }
+    fn time(&self) -> Time {
+        self.sim_time
+    }
 }
 
 #[cfg(test)]
@@ -359,9 +388,18 @@ mod tests {
         use core::f32::consts::PI;
         use nalgebra::{Isometry3, Vector3};
         ArmSpec {
-            joints: vec![JointSpec::Revolute { axis: Vector3::z_axis(), limits: (-PI, PI) }; 2],
+            joints: vec![
+                JointSpec::Revolute {
+                    axis: Vector3::z_axis(),
+                    limits: (-PI, PI)
+                };
+                2
+            ],
             link_offsets: vec![Isometry3::translation(0.0, 0.0, 0.1); 2],
-            gripper: GripperSpec { proximity_threshold: 0.02, max_grasp_size: 0.05 },
+            gripper: GripperSpec {
+                proximity_threshold: 0.02,
+                max_grasp_size: 0.05,
+            },
         }
     }
 
@@ -373,9 +411,18 @@ mod tests {
         use crate::spec::{ArmSpec, GripperSpec, JointSpec};
         use nalgebra::{Isometry3, Vector3};
         ArmSpec {
-            joints: vec![JointSpec::Revolute { axis: Vector3::z_axis(), limits: (-3.2, 3.2) }; 2],
+            joints: vec![
+                JointSpec::Revolute {
+                    axis: Vector3::z_axis(),
+                    limits: (-3.2, 3.2)
+                };
+                2
+            ],
             link_offsets: vec![Isometry3::translation(0.5, 0.0, 0.0); 2],
-            gripper: GripperSpec { proximity_threshold: 0.02, max_grasp_size: 0.05 },
+            gripper: GripperSpec {
+                proximity_threshold: 0.02,
+                max_grasp_size: 0.05,
+            },
         }
     }
 
@@ -452,7 +499,10 @@ mod tests {
         use rtf_core::time::Duration;
         let mut world = ArmWorld::new(Scene::new(0), simple_spec(), true);
         let tx = world.attach_joint_velocity_actuator(JointId(0));
-        tx.send(JointVelocityCommand { joint: JointId(0), q_dot_target: 1.0 });
+        tx.send(JointVelocityCommand {
+            joint: JointId(0),
+            q_dot_target: 1.0,
+        });
         world.consume_actuators_and_integrate_inner(Duration::from_millis(10));
         assert!(world.arm.state.q[0] > 0.0);
     }
@@ -467,7 +517,11 @@ mod tests {
         let ee = world.ee_pose();
         let block_id = ObjectId(42);
         world.scene.insert_object(Object::new(
-            block_id, ee, Shape::Sphere { radius: 0.01 }, 0.1, /* graspable */ true,
+            block_id,
+            ee,
+            Shape::Sphere { radius: 0.01 },
+            0.1,
+            /* graspable */ true,
         ));
 
         let g_tx = world.attach_gripper_actuator();
@@ -500,7 +554,11 @@ mod tests {
         let mut world = ArmWorld::new(Scene::new(0), moving_ee_spec(), true);
         let block_id = ObjectId(42);
         world.scene.insert_object(Object::new(
-            block_id, world.ee_pose(), Shape::Sphere { radius: 0.01 }, 0.1, true,
+            block_id,
+            world.ee_pose(),
+            Shape::Sphere { radius: 0.01 },
+            0.1,
+            true,
         ));
 
         let v_tx = world.attach_joint_velocity_actuator(JointId(0));
@@ -509,28 +567,36 @@ mod tests {
         world.consume_actuators_and_integrate_inner(Duration::from_millis(1));
         let pose_before = world.scene.object(block_id).unwrap().pose;
 
-        v_tx.send(JointVelocityCommand { joint: JointId(0), q_dot_target: 1.0 });
+        v_tx.send(JointVelocityCommand {
+            joint: JointId(0),
+            q_dot_target: 1.0,
+        });
         world.consume_actuators_and_integrate_inner(Duration::from_millis(50));
         let pose_after = world.scene.object(block_id).unwrap().pose;
 
-        assert_ne!(pose_before.translation.vector, pose_after.translation.vector);
+        assert_ne!(
+            pose_before.translation.vector,
+            pose_after.translation.vector
+        );
         let ee = world.ee_pose();
         assert!((pose_after.translation.vector - ee.translation.vector).norm() < 1e-4);
     }
 
     #[test]
     fn arm_world_with_gravity_lets_object_fall_onto_table() {
+        use nalgebra::{Isometry3, Vector3};
         use rtf_core::time::Duration;
         use rtf_sim::fixture::Fixture;
         use rtf_sim::object::{Object, ObjectId, ObjectState};
         use rtf_sim::shape::Shape;
-        use nalgebra::{Isometry3, Vector3};
 
         let mut scene = rtf_sim::scene::Scene::with_ground(0);
         scene.add_fixture(Fixture {
             id: 0,
             pose: Isometry3::translation(0.0, 0.0, 0.5),
-            shape: Shape::Aabb { half_extents: Vector3::new(0.5, 0.5, 0.01) },
+            shape: Shape::Aabb {
+                half_extents: Vector3::new(0.5, 0.5, 0.01),
+            },
             is_support: true,
         });
         let block = ObjectId(1);

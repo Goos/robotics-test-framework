@@ -53,7 +53,10 @@ mod tests {
     }
 
     fn assert_close(a: f32, b: f32, tol: f32, label: &str) {
-        assert!((a - b).abs() < tol, "{label}: got {a}, expected {b} (tol {tol})");
+        assert!(
+            (a - b).abs() < tol,
+            "{label}: got {a}, expected {b} (tol {tol})"
+        );
     }
 
     fn assert_round_trip(target_x: f32, target_z: f32, l1: f32, l2: f32) {

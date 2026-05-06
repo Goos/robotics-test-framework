@@ -42,9 +42,18 @@ impl Default for RunConfig<NullRecorder> {
 }
 
 impl<R: Recorder> RunConfig<R> {
-    pub fn with_tick_rate(mut self, hz: u32) -> Self { self.tick_rate_hz = hz; self }
-    pub fn with_deadline(mut self, dt: Duration) -> Self { self.deadline = dt; self }
-    pub fn with_seed(mut self, seed: u64) -> Self { self.seed = seed; self }
+    pub fn with_tick_rate(mut self, hz: u32) -> Self {
+        self.tick_rate_hz = hz;
+        self
+    }
+    pub fn with_deadline(mut self, dt: Duration) -> Self {
+        self.deadline = dt;
+        self
+    }
+    pub fn with_seed(mut self, seed: u64) -> Self {
+        self.seed = seed;
+        self
+    }
 
     /// Replace the recorder, returning a `RunConfig<NewR>`. Type-changing so
     /// callers can swap the default `NullRecorder` for a real implementation

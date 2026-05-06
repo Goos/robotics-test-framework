@@ -14,7 +14,9 @@ pub struct FileRecorder {
 
 impl FileRecorder {
     pub fn create<P: AsRef<Path>>(path: P) -> io::Result<Self> {
-        Ok(Self { writer: BufWriter::new(File::create(path)?) })
+        Ok(Self {
+            writer: BufWriter::new(File::create(path)?),
+        })
     }
 }
 
@@ -41,8 +43,14 @@ mod tests {
         let path = std::env::temp_dir().join("viz_test_appends_one_line.jsonl");
         let _ = std::fs::remove_file(&path);
         let mut rec = FileRecorder::create(&path).unwrap();
-        rec.record(&SceneSnapshot { t: Time::from_nanos(0), items: vec![] });
-        rec.record(&SceneSnapshot { t: Time::from_millis(1), items: vec![] });
+        rec.record(&SceneSnapshot {
+            t: Time::from_nanos(0),
+            items: vec![],
+        });
+        rec.record(&SceneSnapshot {
+            t: Time::from_millis(1),
+            items: vec![],
+        });
         drop(rec);
         let lines: Vec<_> = BufReader::new(File::open(&path).unwrap()).lines().collect();
         assert_eq!(lines.len(), 2);

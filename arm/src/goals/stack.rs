@@ -18,11 +18,18 @@ pub struct Stack {
 
 impl Stack {
     pub fn new(a: ObjectId, b: ObjectId) -> Self {
-        Self { a, b, settled_since: None, last_tick: None }
+        Self {
+            a,
+            b,
+            settled_since: None,
+            last_tick: None,
+        }
     }
 
     fn currently_stacked(&self, world: &ArmWorld) -> bool {
-        let Some(obj_a) = world.scene.object(self.a) else { return false; };
+        let Some(obj_a) = world.scene.object(self.a) else {
+            return false;
+        };
         matches!(
             obj_a.state,
             ObjectState::Settled { on: SupportId::Object(id) } if id == self.b.0,
@@ -72,12 +79,17 @@ mod tests {
         let mut world = build_pick_and_place_world();
         let a = world.scene.add_object_default();
         let b = world.scene.add_object_default();
-        world.scene.object_mut(a).unwrap().state =
-            ObjectState::Settled { on: SupportId::Object(b.0) };
+        world.scene.object_mut(a).unwrap().state = ObjectState::Settled {
+            on: SupportId::Object(b.0),
+        };
         let mut goal = Stack::new(a, b);
         for ms in 0..100 {
             goal.tick(Time::from_millis(ms), &world);
-            assert!(!goal.is_complete(&world), "should not be complete yet at {} ms", ms);
+            assert!(
+                !goal.is_complete(&world),
+                "should not be complete yet at {} ms",
+                ms
+            );
         }
         goal.tick(Time::from_millis(100), &world);
         assert!(goal.is_complete(&world));

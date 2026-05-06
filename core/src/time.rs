@@ -18,36 +18,60 @@ pub struct Duration(i64);
 
 impl Time {
     pub const ZERO: Self = Self(0);
-    pub const fn from_nanos(n: i64) -> Self { Self(n) }
-    pub const fn from_millis(ms: i64) -> Self { Self(ms * NANOS_PER_MILLI) }
-    pub const fn from_secs(s: i64) -> Self { Self(s * NANOS_PER_SEC) }
-    pub const fn as_nanos(&self) -> i64 { self.0 }
+    pub const fn from_nanos(n: i64) -> Self {
+        Self(n)
+    }
+    pub const fn from_millis(ms: i64) -> Self {
+        Self(ms * NANOS_PER_MILLI)
+    }
+    pub const fn from_secs(s: i64) -> Self {
+        Self(s * NANOS_PER_SEC)
+    }
+    pub const fn as_nanos(&self) -> i64 {
+        self.0
+    }
 }
 
 impl Duration {
     pub const ZERO: Self = Self(0);
-    pub const fn from_nanos(n: i64) -> Self { Self(n) }
-    pub const fn from_millis(ms: i64) -> Self { Self(ms * NANOS_PER_MILLI) }
-    pub const fn from_secs(s: i64) -> Self { Self(s * NANOS_PER_SEC) }
-    pub const fn as_nanos(&self) -> i64 { self.0 }
+    pub const fn from_nanos(n: i64) -> Self {
+        Self(n)
+    }
+    pub const fn from_millis(ms: i64) -> Self {
+        Self(ms * NANOS_PER_MILLI)
+    }
+    pub const fn from_secs(s: i64) -> Self {
+        Self(s * NANOS_PER_SEC)
+    }
+    pub const fn as_nanos(&self) -> i64 {
+        self.0
+    }
     /// Lossy: precision degrades above 2^53 nanos (~104 days). Prefer `as_nanos()`
     /// for exact arithmetic; use this only for human-facing output or controller gains.
-    pub fn as_secs_f64(&self) -> f64 { self.0 as f64 / NANOS_PER_SEC as f64 }
+    pub fn as_secs_f64(&self) -> f64 {
+        self.0 as f64 / NANOS_PER_SEC as f64
+    }
 }
 
 impl Sub<Time> for Time {
     type Output = Duration;
-    fn sub(self, rhs: Time) -> Duration { Duration(self.0 - rhs.0) }
+    fn sub(self, rhs: Time) -> Duration {
+        Duration(self.0 - rhs.0)
+    }
 }
 
 impl Add<Duration> for Time {
     type Output = Time;
-    fn add(self, rhs: Duration) -> Time { Time(self.0 + rhs.0) }
+    fn add(self, rhs: Duration) -> Time {
+        Time(self.0 + rhs.0)
+    }
 }
 
 impl Add<Duration> for Duration {
     type Output = Duration;
-    fn add(self, other: Duration) -> Duration { Duration(self.0 + other.0) }
+    fn add(self, other: Duration) -> Duration {
+        Duration(self.0 + other.0)
+    }
 }
 
 #[cfg(test)]
@@ -65,7 +89,7 @@ mod tests {
     fn time_subtraction_yields_signed_duration() {
         let t0 = Time::from_nanos(1_000);
         let t1 = Time::from_nanos(500);
-        assert_eq!((t0 - t1).as_nanos(),  500);
+        assert_eq!((t0 - t1).as_nanos(), 500);
         assert_eq!((t1 - t0).as_nanos(), -500);
     }
 
@@ -83,6 +107,9 @@ mod tests {
 
     #[test]
     fn duration_plus_duration() {
-        assert_eq!((Duration::from_nanos(1) + Duration::from_nanos(2)).as_nanos(), 3);
+        assert_eq!(
+            (Duration::from_nanos(1) + Duration::from_nanos(2)).as_nanos(),
+            3
+        );
     }
 }
