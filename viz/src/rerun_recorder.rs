@@ -1,7 +1,7 @@
 //! Rerun recorder — gated on the `rerun` feature. Maps `Primitive` variants
-//! onto rerun archetypes, one entity path per `EntityId`. Steps 8.3a/8.3b
-//! cover `Sphere` and `Box`; remaining variants (Capsule/Line/Label) land in
-//! 8.3c–e.
+//! onto rerun archetypes, one entity path per `EntityId`. Steps 8.3a–c cover
+//! `Sphere`, `Box`, and `Capsule`; remaining variants (Line/Label) land in
+//! 8.3d–e.
 
 use rtf_sim::{
     primitive::{Primitive, SceneSnapshot},
@@ -58,6 +58,24 @@ impl Recorder for RerunRecorder {
                         ),
                     );
                 }
+                Primitive::Capsule { pose, half_height, radius, color: _ } => {
+                    // Fallback: render as two spheres at the capsule endpoints.
+                    // Rerun 0.21's `Capsules3D::from_endpoints_and_radii` is
+                    // gated behind the `glam` feature, which the rerun crate
+                    // doesn't enable by default; revisit if a future rerun
+                    // version exposes endpoint construction unconditionally.
+                    let dir_z = pose.rotation.transform_vector(&nalgebra::Vector3::z());
+                    let p1 = pose.translation.vector + dir_z * (*half_height);
+                    let p2 = pose.translation.vector - dir_z * (*half_height);
+                    let _ = self.stream.log(
+                        path.as_str(),
+                        &rerun::archetypes::Points3D::new([
+                            [p1.x, p1.y, p1.z],
+                            [p2.x, p2.y, p2.z],
+                        ])
+                        .with_radii([*radius, *radius]),
+                    );
+                }
                 _ => {}
             }
         }
@@ -98,6 +116,23 @@ mod tests {
                 Primitive::Box {
                     pose: Isometry3::identity(),
                     half_extents: Vector3::new(0.05, 0.05, 0.05),
+                    color: Color::WHITE,
+                },
+            )],
+        });
+    }
+
+    #[test]
+    fn rerun_recorder_records_a_capsule() {
+        let mut rec = RerunRecorder::in_memory("test").unwrap();
+        rec.record(&SceneSnapshot {
+            t: Time::from_nanos(0),
+            items: vec![(
+                EntityId::Object(2),
+                Primitive::Capsule {
+                    pose: Isometry3::identity(),
+                    half_height: 0.1,
+                    radius: 0.02,
                     color: Color::WHITE,
                 },
             )],

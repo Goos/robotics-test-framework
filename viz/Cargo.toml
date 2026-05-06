@@ -10,12 +10,12 @@ rerun = ["dep:rerun"]
 [dependencies]
 rtf_sim = { path = "../sim", features = ["serde"] }
 rerun = { workspace = true, optional = true }
+nalgebra.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 [dev-dependencies]
 rtf_core = { path = "../core" }
-nalgebra.workspace = true
 
 [lints]
 workspace = true
