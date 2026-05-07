@@ -3,16 +3,17 @@
 //! of object-location information, then descends, grasps the contacted
 //! block, and drops it into the bin.
 //!
-//! Run a single seed (interactive demo):
+//! Run a single seed (interactive demo, records to $TMPDIR/find_grasp_place.rrd
+//! when --features viz-rerun):
 //!   `cargo run --example find_grasp_place --features examples`
+//!   `cargo run --example find_grasp_place --features viz-rerun`
 //!
-//! Run the 3-seed e2e regression as tests:
+//! Run the 3-seed e2e regression as tests (each test records to
+//! $TMPDIR/<test_name>.rrd when --features viz-rerun):
 //!   `cargo test --example find_grasp_place --features examples`
+//!   `cargo test --example find_grasp_place --features viz-rerun`
 //!
-//! Save a rerun .rrd for visual inspection (requires the `viz-rerun` feature):
-//!   `cargo test --example find_grasp_place --features viz-rerun \
-//!      find_grasp_place_save_rrd -- --nocapture`
-//! Then view with `rerun <printed-path>` (install once via
+//! View any saved rrd with `rerun <printed-path>` (install once via
 //! `cargo install rerun-cli --version 0.21`).
 
 use rtf_arm::{
@@ -370,7 +371,8 @@ fn serpentine_waypoints(
 
 // -- Runner --------------------------------------------------------------
 
-fn run_one_seed(seed: u64) -> rtf_harness::RunResult {
+fn run_one_seed(seed: u64, rrd_name: &str) -> rtf_harness::RunResult {
+    let _ = rrd_name; // used only when viz-rerun is on
     let mut world = build_search_world(seed);
     let ports = world.attach_standard_arm_ports();
     let ee_pose_rx = world.attach_ee_pose_sensor(RateHz::new(100));
@@ -397,12 +399,23 @@ fn run_one_seed(seed: u64) -> rtf_harness::RunResult {
     let cfg = RunConfig::default()
         .with_deadline(Duration::from_secs(30))
         .with_seed(seed);
-    run(world, controller, goal, cfg)
+
+    #[cfg(feature = "viz-rerun")]
+    {
+        match rtf_viz::maybe_recorder_for(rrd_name) {
+            Some(rec) => run(world, controller, goal, cfg.with_recorder(rec)),
+            None => run(world, controller, goal, cfg),
+        }
+    }
+    #[cfg(not(feature = "viz-rerun"))]
+    {
+        run(world, controller, goal, cfg)
+    }
 }
 
 fn main() {
     let seed = 42_u64;
-    let res = run_one_seed(seed);
+    let res = run_one_seed(seed, "find_grasp_place");
     println!(
         "find_grasp_place(seed={seed}): terminated_by={:?}, final_time={:?}, score={}",
         res.terminated_by, res.final_time, res.score.value,
@@ -412,7 +425,7 @@ fn main() {
 #[test]
 fn find_grasp_place_seed_1() {
     let seed = 1_u64;
-    let res = run_one_seed(seed);
+    let res = run_one_seed(seed, "find_grasp_place_seed_1");
     eprintln!(
         "seed={seed}: terminated_by={:?}, final_time={:?}, score={}",
         res.terminated_by, res.final_time, res.score.value,
@@ -429,7 +442,7 @@ fn find_grasp_place_seed_1() {
 #[test]
 fn find_grasp_place_seed_42() {
     let seed = 42_u64;
-    let res = run_one_seed(seed);
+    let res = run_one_seed(seed, "find_grasp_place_seed_42");
     eprintln!(
         "seed={seed}: terminated_by={:?}, final_time={:?}, score={}",
         res.terminated_by, res.final_time, res.score.value,
@@ -446,7 +459,7 @@ fn find_grasp_place_seed_42() {
 #[test]
 fn find_grasp_place_seed_1337() {
     let seed = 1337_u64;
-    let res = run_one_seed(seed);
+    let res = run_one_seed(seed, "find_grasp_place_seed_1337");
     eprintln!(
         "seed={seed}: terminated_by={:?}, final_time={:?}, score={}",
         res.terminated_by, res.final_time, res.score.value,
@@ -458,54 +471,6 @@ fn find_grasp_place_seed_1337() {
         res.score.value,
     );
     assert!(res.score.value > 0.9);
-}
-
-#[cfg(feature = "viz-rerun")]
-#[test]
-fn find_grasp_place_save_rrd() {
-    use rtf_viz::RerunRecorder;
-
-    let seed = 42_u64;
-    let path = std::env::temp_dir().join("find_grasp_place.rrd");
-    let _ = std::fs::remove_file(&path);
-    let rec = RerunRecorder::save_to_file(&path, "find_grasp_place").unwrap();
-
-    let mut world = build_search_world(seed);
-    let ports = world.attach_standard_arm_ports();
-    let ee_pose_rx = world.attach_ee_pose_sensor(RateHz::new(100));
-    let pressure_rx = world.attach_pressure_sensor(RateHz::new(1000), 0.03);
-    let block = block_id(&world);
-    let bin = bin_id(&world);
-
-    let controller = SearchAndPlace::new(
-        ports.encoder_rxs,
-        ee_pose_rx,
-        pressure_rx,
-        ports.velocity_txs,
-        ports.gripper_tx,
-        SEARCH_REGION_X,
-        SEARCH_REGION_Y,
-        0.57,
-        0.05,
-        (0.0, 0.6),
-        0.8,
-        0.4,
-        0.4,
-    );
-    let goal = PlaceInBin::new(block, bin);
-    let cfg = RunConfig::default()
-        .with_deadline(Duration::from_secs(30))
-        .with_seed(seed)
-        .with_recorder(rec);
-
-    let res = run(world, controller, goal, cfg);
-    eprintln!("Saved rrd file to: {:?}", path);
-    eprintln!("View with: rerun {:?}", path);
-    assert!(
-        matches!(res.terminated_by, Termination::GoalComplete),
-        "did not converge while saving rrd; final score = {}",
-        res.score.value,
-    );
 }
 
 // -- Tests ---------------------------------------------------------------

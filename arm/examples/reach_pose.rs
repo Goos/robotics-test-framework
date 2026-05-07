@@ -3,11 +3,13 @@
 //! ArmWorld → harness tick loop → PdJointController → ReachPose goal →
 //! GoalComplete termination.
 //!
-//! Run terminal-only:
+//! Run a single demo (records to $TMPDIR/reach_pose.rrd if --features viz-rerun):
 //!   `cargo run --example reach_pose --features examples`
+//!   `cargo run --example reach_pose --features viz-rerun`
 //!
-//! Run as a test:
+//! Run as a test (records to $TMPDIR/<test_name>.rrd if --features viz-rerun):
 //!   `cargo test --example reach_pose --features examples`
+//!   `cargo test --example reach_pose --features viz-rerun`
 
 use rtf_arm::{
     fk::forward_kinematics, goals::reach_pose::ReachPose, test_helpers::build_simple_arm_world,
@@ -18,7 +20,8 @@ use rtf_core::time::Duration;
 use rtf_harness::Termination;
 use rtf_harness::{run, RunConfig};
 
-fn run_reach_pose_default() -> rtf_harness::RunResult {
+fn run_reach_pose(rrd_name: &str) -> rtf_harness::RunResult {
+    let _ = rrd_name; // used only when viz-rerun is on
     let mut world = build_simple_arm_world(3);
     let ports = world.attach_standard_arm_ports();
 
@@ -33,11 +36,21 @@ fn run_reach_pose_default() -> rtf_harness::RunResult {
         .with_tick_rate(1000)
         .with_seed(42);
 
-    run(world, controller, goal, cfg)
+    #[cfg(feature = "viz-rerun")]
+    {
+        match rtf_viz::maybe_recorder_for(rrd_name) {
+            Some(rec) => run(world, controller, goal, cfg.with_recorder(rec)),
+            None => run(world, controller, goal, cfg),
+        }
+    }
+    #[cfg(not(feature = "viz-rerun"))]
+    {
+        run(world, controller, goal, cfg)
+    }
 }
 
 fn main() {
-    let res = run_reach_pose_default();
+    let res = run_reach_pose("reach_pose");
     println!(
         "ReachPose: terminated_by={:?}, final_time_ns={}, score={}",
         res.terminated_by,
@@ -48,7 +61,7 @@ fn main() {
 
 #[test]
 fn pd_reaches_target_pose_within_2_seconds() {
-    let res = run_reach_pose_default();
+    let res = run_reach_pose("pd_reaches_target_pose_within_2_seconds");
     eprintln!(
         "e2e: terminated_by={:?}, final_time_ns={}, score={}",
         res.terminated_by,

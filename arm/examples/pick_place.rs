@@ -1,16 +1,15 @@
 //! Headline acceptance scenario for v1: a Z-Y-Y arm yaws over a block,
 //! descends, grasps, ascends, swings to a bin, and releases.
 //!
-//! Run terminal-only:
+//! Run a single demo (records to $TMPDIR/pick_place.rrd if --features viz-rerun):
 //!   `cargo run --example pick_place --features examples`
+//!   `cargo run --example pick_place --features viz-rerun`
 //!
-//! Run as a test:
+//! Run as a test (records to $TMPDIR/<test_name>.rrd if --features viz-rerun):
 //!   `cargo test --example pick_place --features examples`
+//!   `cargo test --example pick_place --features viz-rerun`
 //!
-//! Save a rerun .rrd for visual inspection (requires the `viz-rerun` feature):
-//!   `cargo test --example pick_place --features viz-rerun \
-//!      pick_place_save_rrd -- --nocapture`
-//! Then view with `rerun <printed-path>` (install once via
+//! View saved rrd with `rerun <printed-path>` (install once via
 //! `cargo install rerun-cli --version 0.21`).
 
 use rtf_arm::{
@@ -264,7 +263,8 @@ where
 
 // -- Runner --------------------------------------------------------------
 
-fn run_pick_place_default() -> rtf_harness::RunResult {
+fn run_pick_place(rrd_name: &str) -> rtf_harness::RunResult {
+    let _ = rrd_name; // used only when viz-rerun is on
     let mut world = build_pick_and_place_world();
     let ports = world.attach_standard_arm_ports();
     let ee_pose_rx = world.attach_ee_pose_sensor(RateHz::new(100));
@@ -288,11 +288,21 @@ fn run_pick_place_default() -> rtf_harness::RunResult {
         .with_deadline(Duration::from_secs(15))
         .with_seed(42);
 
-    run(world, controller, goal, cfg)
+    #[cfg(feature = "viz-rerun")]
+    {
+        match rtf_viz::maybe_recorder_for(rrd_name) {
+            Some(rec) => run(world, controller, goal, cfg.with_recorder(rec)),
+            None => run(world, controller, goal, cfg),
+        }
+    }
+    #[cfg(not(feature = "viz-rerun"))]
+    {
+        run(world, controller, goal, cfg)
+    }
 }
 
 fn main() {
-    let res = run_pick_place_default();
+    let res = run_pick_place("pick_place");
     println!(
         "PickPlace: terminated_by={:?}, final_time={:?}, score={}",
         res.terminated_by, res.final_time, res.score.value,
@@ -303,7 +313,7 @@ fn main() {
 
 #[test]
 fn state_machine_picks_block_and_drops_in_bin() {
-    let res = run_pick_place_default();
+    let res = run_pick_place("state_machine_picks_block_and_drops_in_bin");
     eprintln!(
         "e2e PickPlace: terminated_by={:?}, final_time={:?}, score={}",
         res.terminated_by, res.final_time, res.score.value,
@@ -315,88 +325,6 @@ fn state_machine_picks_block_and_drops_in_bin() {
         res.terminated_by,
     );
     assert!(res.score.value > 0.9);
-}
-
-#[cfg(feature = "viz-rerun")]
-#[test]
-fn state_machine_picks_block_and_drops_in_bin_with_rerun() {
-    use rtf_viz::RerunRecorder;
-
-    let rec = RerunRecorder::in_memory("pick_place").unwrap();
-
-    let mut world = build_pick_and_place_world();
-    let ports = world.attach_standard_arm_ports();
-    let ee_pose_rx = world.attach_ee_pose_sensor(RateHz::new(100));
-    let block = block_id(&world);
-    let bin = bin_id(&world);
-
-    let controller = PickPlace::new(
-        ports.encoder_rxs,
-        ee_pose_rx,
-        ports.velocity_txs,
-        ports.gripper_tx,
-        (0.6, 0.0),
-        (0.0, 0.6),
-        0.8,
-        0.4,
-        0.4,
-    );
-    let goal = PlaceInBin::new(block, bin);
-
-    let cfg = RunConfig::default()
-        .with_deadline(Duration::from_secs(15))
-        .with_seed(42)
-        .with_recorder(rec);
-
-    let res = run(world, controller, goal, cfg);
-    assert!(
-        matches!(res.terminated_by, Termination::GoalComplete),
-        "did not converge with rerun recorder; final score = {}",
-        res.score.value,
-    );
-}
-
-#[cfg(feature = "viz-rerun")]
-#[test]
-fn pick_place_save_rrd() {
-    use rtf_viz::RerunRecorder;
-
-    let path = std::env::temp_dir().join("pick_place.rrd");
-    let _ = std::fs::remove_file(&path);
-    let rec = RerunRecorder::save_to_file(&path, "pick_place").unwrap();
-
-    let mut world = build_pick_and_place_world();
-    let ports = world.attach_standard_arm_ports();
-    let ee_pose_rx = world.attach_ee_pose_sensor(RateHz::new(100));
-    let block = block_id(&world);
-    let bin = bin_id(&world);
-
-    let controller = PickPlace::new(
-        ports.encoder_rxs,
-        ee_pose_rx,
-        ports.velocity_txs,
-        ports.gripper_tx,
-        (0.6, 0.0),
-        (0.0, 0.6),
-        0.8,
-        0.4,
-        0.4,
-    );
-    let goal = PlaceInBin::new(block, bin);
-
-    let cfg = RunConfig::default()
-        .with_deadline(Duration::from_secs(15))
-        .with_seed(42)
-        .with_recorder(rec);
-
-    let res = run(world, controller, goal, cfg);
-    eprintln!("Saved rrd file to: {:?}", path);
-    eprintln!("View with: rerun {:?}", path);
-    assert!(
-        matches!(res.terminated_by, Termination::GoalComplete),
-        "did not converge while saving rrd; final score = {}",
-        res.score.value,
-    );
 }
 
 #[cfg(test)]

@@ -4,8 +4,9 @@
 //! `Box<dyn PortReader<JointEncoderReading>>` and that the PD gains are
 //! robust enough to absorb light sensor faults.
 //!
-//! Run terminal-only:
+//! Run a single demo (records to $TMPDIR/reach_pose_with_faults.rrd if --features viz-rerun):
 //!   `cargo run --example reach_pose_with_faults --features examples`
+//!   `cargo run --example reach_pose_with_faults --features viz-rerun`
 //!
 //! Run as a test:
 //!   `cargo test --example reach_pose_with_faults --features examples`
@@ -26,7 +27,8 @@ use rtf_harness::Termination;
 use rtf_harness::{run, RunConfig};
 use rtf_sim::faults::{Delay, GaussianNoise};
 
-fn run_reach_pose_with_faults_default() -> rtf_harness::RunResult {
+fn run_reach_pose_with_faults(rrd_name: &str) -> rtf_harness::RunResult {
+    let _ = rrd_name; // used only when viz-rerun is on
     let mut world = build_simple_arm_world(3);
     let raw_clock = world.sim_clock_handle();
     let clock_dyn: Rc<dyn Clock> = raw_clock.clone();
@@ -60,11 +62,21 @@ fn run_reach_pose_with_faults_default() -> rtf_harness::RunResult {
         .with_tick_rate(1000)
         .with_seed(42);
 
-    run(world, controller, goal, cfg)
+    #[cfg(feature = "viz-rerun")]
+    {
+        match rtf_viz::maybe_recorder_for(rrd_name) {
+            Some(rec) => run(world, controller, goal, cfg.with_recorder(rec)),
+            None => run(world, controller, goal, cfg),
+        }
+    }
+    #[cfg(not(feature = "viz-rerun"))]
+    {
+        run(world, controller, goal, cfg)
+    }
 }
 
 fn main() {
-    let res = run_reach_pose_with_faults_default();
+    let res = run_reach_pose_with_faults("reach_pose_with_faults");
     println!(
         "ReachPose+faults: terminated_by={:?}, final_time_ns={}, score={}",
         res.terminated_by,
@@ -75,7 +87,8 @@ fn main() {
 
 #[test]
 fn pd_still_reaches_target_with_2ms_encoder_delay_and_noise() {
-    let res = run_reach_pose_with_faults_default();
+    let res =
+        run_reach_pose_with_faults("pd_still_reaches_target_with_2ms_encoder_delay_and_noise");
     eprintln!(
         "e2e (faults): terminated_by={:?}, final_time_ns={}, score={}",
         res.terminated_by,
