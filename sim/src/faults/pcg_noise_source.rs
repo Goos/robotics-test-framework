@@ -65,7 +65,10 @@ mod tests {
         let n = 1000;
         let sum: f32 = (0..n).map(|_| s.uniform_unit()).sum();
         let mean = sum / n as f32;
-        assert!((0.45..=0.55).contains(&mean), "mean {mean} outside [0.45, 0.55]");
+        assert!(
+            (0.45..=0.55).contains(&mean),
+            "mean {mean} outside [0.45, 0.55]"
+        );
     }
 
     #[test]

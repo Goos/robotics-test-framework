@@ -1,27 +1,38 @@
 //! Find-grasp-place scenario: a Z-Y-Y arm sweeps a serpentine raster over
 //! the search region using its EE-mounted pressure sensor as the only source
-//! of object-location information, then descends, grasps the contact'd
+//! of object-location information, then descends, grasps the contacted
 //! block, and drops it into the bin.
 //!
-//! Step 5 lands the controller skeleton + Sweeping state. The post-contact
-//! states (Step 6) and the headline e2e (Step 7) follow in subsequent
-//! commits; `main()` is a stub until Step 7 wires up the harness loop.
-//!
-//! Run terminal-only (Step 7+):
+//! Run a single seed (interactive demo):
 //!   `cargo run --example find_grasp_place --features examples`
+//!
+//! Run the 3-seed e2e regression as tests:
+//!   `cargo test --example find_grasp_place --features examples`
+//!
+//! Save a rerun .rrd for visual inspection (requires the `viz-rerun` feature):
+//!   `cargo test --example find_grasp_place --features viz-rerun \
+//!      find_grasp_place_save_rrd -- --nocapture`
+//! Then view with `rerun <printed-path>` (install once via
+//! `cargo install rerun-cli --version 0.21`).
 
 use rtf_arm::{
+    goals::PlaceInBin,
     ik::ik_2r,
     ports::{
         EePoseReading, GripperCommand, JointEncoderReading, JointId, JointVelocityCommand,
         PressureReading,
     },
+    test_helpers::{bin_id, block_id, build_search_world, SEARCH_REGION_X, SEARCH_REGION_Y},
+    RateHz,
 };
 use rtf_core::{
     controller::{ControlError, Controller},
     port::{PortReader, PortTx},
-    time::Time,
+    time::{Duration, Time},
 };
+#[cfg(test)]
+use rtf_harness::Termination;
+use rtf_harness::{run, RunConfig};
 
 // -- Controller ----------------------------------------------------------
 
@@ -73,8 +84,15 @@ where
     /// hot path doesn't run IK per tick.
     sweep_waypoints: Vec<(f32, f32, f32)>,
     sweep_idx: usize,
-    /// Recorded EE xy at the moment pressure exceeded threshold; populated
-    /// when transitioning Sweeping → DescendToContact.
+    /// EE xy at the running max-pressure moment seen so far. Cheap form of
+    /// peak-tracking: instead of descending at the FIRST sample above
+    /// threshold (which is offset from the block centre by EE velocity), the
+    /// controller keeps sweeping while pressure rises and only commits to
+    /// descend once pressure falls back below threshold — at which point
+    /// peak_xy is the best on-track guess of the block's xy.
+    peak_pressure: f32,
+    peak_xy: Option<(f32, f32)>,
+    /// Final commit position for descent (= peak_xy at transition time).
     contact_xy: Option<(f32, f32)>,
     target_bin_xy: (f32, f32),
     pressure_threshold: f32,
@@ -133,6 +151,8 @@ where
             state: SearchAndPlaceState::Sweeping,
             sweep_waypoints,
             sweep_idx: 0,
+            peak_pressure: 0.0,
+            peak_xy: None,
             contact_xy: None,
             target_bin_xy,
             pressure_threshold: 0.2,
@@ -226,19 +246,26 @@ where
 
         match self.state {
             SearchAndPlaceState::Sweeping => {
-                if pressure > self.pressure_threshold {
-                    // Capture EE xy at the moment of contact; if the EE pose
-                    // hasn't published yet, fall back to the current waypoint
-                    // xy so contact_xy is always populated by transition.
-                    self.contact_xy = self.ee_xy().or_else(|| {
-                        let (j0, j1, j2) = self.sweep_waypoints[self.sweep_idx];
-                        // Reverse-FK roughly: radial = l1*sin(j1)+l2*sin(j1+j2);
-                        // we don't have FK handy here, so prefer the EE xy
-                        // when it's available (the .or_else branch is just a
-                        // safety net for tests that forget to publish EE).
-                        let _ = (j0, j1, j2);
-                        Some((0.0, 0.0))
-                    });
+                // Track running peak: if current pressure is higher than the
+                // peak so far, record this EE xy as the new peak xy. This
+                // gives a better contact estimate than triggering on the
+                // first sample above threshold (which is biased by EE
+                // velocity into the contact zone).
+                if pressure > self.peak_pressure {
+                    self.peak_pressure = pressure;
+                    if let Some(xy) = self.ee_xy() {
+                        self.peak_xy = Some(xy);
+                    }
+                }
+
+                // Commit to descent once we've seen a peak above threshold AND
+                // pressure has fallen back below threshold (i.e. we've already
+                // crossed the block's contact zone — the peak xy is now our
+                // best block-position estimate).
+                if self.peak_pressure > self.pressure_threshold
+                    && pressure < self.pressure_threshold
+                {
+                    self.contact_xy = self.peak_xy;
                     self.state = SearchAndPlaceState::DescendToContact;
                     self.halt_joints();
                     return Ok(());
@@ -343,10 +370,142 @@ fn serpentine_waypoints(
 
 // -- Runner --------------------------------------------------------------
 
+fn run_one_seed(seed: u64) -> rtf_harness::RunResult {
+    let mut world = build_search_world(seed);
+    let ports = world.attach_standard_arm_ports();
+    let ee_pose_rx = world.attach_ee_pose_sensor(RateHz::new(100));
+    let pressure_rx = world.attach_pressure_sensor(RateHz::new(1000), 0.03);
+    let block = block_id(&world);
+    let bin = bin_id(&world);
+
+    let controller = SearchAndPlace::new(
+        ports.encoder_rxs,
+        ee_pose_rx,
+        pressure_rx,
+        ports.velocity_txs,
+        ports.gripper_tx,
+        SEARCH_REGION_X,
+        SEARCH_REGION_Y,
+        /* sweep_z */ 0.57,
+        /* stripe_dy */ 0.05,
+        /* target_bin_xy */ (0.0, 0.6),
+        /* arm_shoulder_z */ 0.8,
+        /* l1 */ 0.4,
+        /* l2 */ 0.4,
+    );
+    let goal = PlaceInBin::new(block, bin);
+    let cfg = RunConfig::default()
+        .with_deadline(Duration::from_secs(30))
+        .with_seed(seed);
+    run(world, controller, goal, cfg)
+}
+
 fn main() {
-    // Step 7 fills in the harness loop; for now this just keeps `cargo build
-    // --example find_grasp_place` happy.
-    println!("find_grasp_place: main() will be wired up in Step 7");
+    let seed = 42_u64;
+    let res = run_one_seed(seed);
+    println!(
+        "find_grasp_place(seed={seed}): terminated_by={:?}, final_time={:?}, score={}",
+        res.terminated_by, res.final_time, res.score.value,
+    );
+}
+
+#[test]
+fn find_grasp_place_seed_1() {
+    let seed = 1_u64;
+    let res = run_one_seed(seed);
+    eprintln!(
+        "seed={seed}: terminated_by={:?}, final_time={:?}, score={}",
+        res.terminated_by, res.final_time, res.score.value,
+    );
+    assert!(
+        matches!(res.terminated_by, Termination::GoalComplete),
+        "seed {seed} did not converge in 30s; terminated_by={:?}, score={}",
+        res.terminated_by,
+        res.score.value,
+    );
+    assert!(res.score.value > 0.9);
+}
+
+#[test]
+fn find_grasp_place_seed_42() {
+    let seed = 42_u64;
+    let res = run_one_seed(seed);
+    eprintln!(
+        "seed={seed}: terminated_by={:?}, final_time={:?}, score={}",
+        res.terminated_by, res.final_time, res.score.value,
+    );
+    assert!(
+        matches!(res.terminated_by, Termination::GoalComplete),
+        "seed {seed} did not converge in 30s; terminated_by={:?}, score={}",
+        res.terminated_by,
+        res.score.value,
+    );
+    assert!(res.score.value > 0.9);
+}
+
+#[test]
+fn find_grasp_place_seed_1337() {
+    let seed = 1337_u64;
+    let res = run_one_seed(seed);
+    eprintln!(
+        "seed={seed}: terminated_by={:?}, final_time={:?}, score={}",
+        res.terminated_by, res.final_time, res.score.value,
+    );
+    assert!(
+        matches!(res.terminated_by, Termination::GoalComplete),
+        "seed {seed} did not converge in 30s; terminated_by={:?}, score={}",
+        res.terminated_by,
+        res.score.value,
+    );
+    assert!(res.score.value > 0.9);
+}
+
+#[cfg(feature = "viz-rerun")]
+#[test]
+fn find_grasp_place_save_rrd() {
+    use rtf_viz::RerunRecorder;
+
+    let seed = 42_u64;
+    let path = std::env::temp_dir().join("find_grasp_place.rrd");
+    let _ = std::fs::remove_file(&path);
+    let rec = RerunRecorder::save_to_file(&path, "find_grasp_place").unwrap();
+
+    let mut world = build_search_world(seed);
+    let ports = world.attach_standard_arm_ports();
+    let ee_pose_rx = world.attach_ee_pose_sensor(RateHz::new(100));
+    let pressure_rx = world.attach_pressure_sensor(RateHz::new(1000), 0.03);
+    let block = block_id(&world);
+    let bin = bin_id(&world);
+
+    let controller = SearchAndPlace::new(
+        ports.encoder_rxs,
+        ee_pose_rx,
+        pressure_rx,
+        ports.velocity_txs,
+        ports.gripper_tx,
+        SEARCH_REGION_X,
+        SEARCH_REGION_Y,
+        0.57,
+        0.05,
+        (0.0, 0.6),
+        0.8,
+        0.4,
+        0.4,
+    );
+    let goal = PlaceInBin::new(block, bin);
+    let cfg = RunConfig::default()
+        .with_deadline(Duration::from_secs(30))
+        .with_seed(seed)
+        .with_recorder(rec);
+
+    let res = run(world, controller, goal, cfg);
+    eprintln!("Saved rrd file to: {:?}", path);
+    eprintln!("View with: rerun {:?}", path);
+    assert!(
+        matches!(res.terminated_by, Termination::GoalComplete),
+        "did not converge while saving rrd; final score = {}",
+        res.score.value,
+    );
 }
 
 // -- Tests ---------------------------------------------------------------
@@ -477,14 +636,25 @@ mod search_and_place_tests {
     }
 
     #[test]
-    fn sweep_transitions_to_descend_when_pressure_spikes() {
+    fn sweep_transitions_to_descend_after_pressure_peak_falls_off() {
         let mut rig = make_rig();
         publish_encoders(&rig, [0.0, 0.0, 0.0]);
+        // Tick 1: EE over the block at xy=(0.55, 0.10), pressure peaks
+        // at 0.6. Peak gets recorded, but commit waits for pressure to
+        // fall back below threshold.
         publish_ee_xy(&rig, (0.55, 0.10));
-        // Pressure > threshold (0.2).
         publish_pressure(&rig, 0.6);
         rig.c.step(Time::ZERO).unwrap();
-        assert!(matches!(rig.c.state(), SearchAndPlaceState::DescendToContact));
+        assert!(matches!(rig.c.state(), SearchAndPlaceState::Sweeping));
+        // Tick 2: EE has moved past the block, pressure drops to 0.0 →
+        // controller commits to descending at the recorded peak xy.
+        publish_ee_xy(&rig, (0.60, 0.10));
+        publish_pressure(&rig, 0.0);
+        rig.c.step(Time::ZERO).unwrap();
+        assert!(matches!(
+            rig.c.state(),
+            SearchAndPlaceState::DescendToContact
+        ));
         assert_eq!(rig.c.contact_xy, Some((0.55, 0.10)));
     }
 
@@ -505,16 +675,26 @@ mod search_and_place_tests {
         assert!(matches!(rig.c.state(), SearchAndPlaceState::Failed));
     }
 
-    /// Drive the rig through Sweeping → DescendToContact via a single tick
-    /// where pressure spikes above threshold. Returns the rig in the
-    /// DescendToContact state.
+    /// Drive the rig through Sweeping → DescendToContact: tick once with
+    /// pressure peaking at `contact_xy`, then a second tick with EE moved
+    /// past the block and pressure back to 0 to commit the descent.
     fn rig_at_descend(contact_xy: (f32, f32)) -> Rig {
         let mut rig = make_rig();
         publish_encoders(&rig, [0.0, 0.0, 0.0]);
+        // Peak: EE at contact_xy with pressure above threshold.
         publish_ee_xy(&rig, contact_xy);
         publish_pressure(&rig, 0.6);
         rig.c.step(Time::ZERO).unwrap();
-        assert!(matches!(rig.c.state(), SearchAndPlaceState::DescendToContact));
+        assert!(matches!(rig.c.state(), SearchAndPlaceState::Sweeping));
+        // Commit: EE has moved on (xy doesn't matter for the post-peak
+        // commit), pressure dropped back below threshold.
+        publish_ee_xy(&rig, (contact_xy.0 + 0.05, contact_xy.1));
+        publish_pressure(&rig, 0.0);
+        rig.c.step(Time::ZERO).unwrap();
+        assert!(matches!(
+            rig.c.state(),
+            SearchAndPlaceState::DescendToContact
+        ));
         rig
     }
 
@@ -528,7 +708,10 @@ mod search_and_place_tests {
         publish_ee_xy(&rig, cxy);
         publish_pressure(&rig, 0.6);
         rig.c.step(Time::ZERO).unwrap();
-        assert!(matches!(rig.c.state(), SearchAndPlaceState::CloseGripper(_)));
+        assert!(matches!(
+            rig.c.state(),
+            SearchAndPlaceState::CloseGripper(_)
+        ));
     }
 
     #[test]
@@ -538,13 +721,19 @@ mod search_and_place_tests {
         let target = rig.c.ik_target_for(cxy, GRASP_Z);
         publish_encoders(&rig, [target.0, target.1, target.2]);
         rig.c.step(Time::ZERO).unwrap();
-        assert!(matches!(rig.c.state(), SearchAndPlaceState::CloseGripper(_)));
+        assert!(matches!(
+            rig.c.state(),
+            SearchAndPlaceState::CloseGripper(_)
+        ));
         // Hold for >= CLOSE_HOLD_TICKS more steps; encoders + pressure stay
         // unchanged (Close is a halt state).
         for _ in 0..(super::CLOSE_HOLD_TICKS + 10) {
             rig.c.step(Time::ZERO).unwrap();
         }
-        assert!(matches!(rig.c.state(), SearchAndPlaceState::AscendWithBlock));
+        assert!(matches!(
+            rig.c.state(),
+            SearchAndPlaceState::AscendWithBlock
+        ));
     }
 
     #[test]
@@ -558,7 +747,10 @@ mod search_and_place_tests {
         for _ in 0..(super::CLOSE_HOLD_TICKS + 10) {
             rig.c.step(Time::ZERO).unwrap();
         }
-        assert!(matches!(rig.c.state(), SearchAndPlaceState::AscendWithBlock));
+        assert!(matches!(
+            rig.c.state(),
+            SearchAndPlaceState::AscendWithBlock
+        ));
         // Now report convergence at the ascend target.
         let ascend_target = rig.c.ik_target_for(cxy, super::PARK_Z);
         publish_encoders(&rig, [ascend_target.0, ascend_target.1, ascend_target.2]);

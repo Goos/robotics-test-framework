@@ -192,11 +192,7 @@ impl ArmWorld {
     /// proximity-falloff radius `eps` (find-grasp-place design §2). Returns
     /// the receiver end; the world retains the sender + scheduler and pushes
     /// readings during `publish_sensors`.
-    pub fn attach_pressure_sensor(
-        &mut self,
-        rate: RateHz,
-        eps: f32,
-    ) -> PortRx<PressureReading> {
+    pub fn attach_pressure_sensor(&mut self, rate: RateHz, eps: f32) -> PortRx<PressureReading> {
         let (tx, rx) = rtf_core::port::port::<PressureReading>();
         let port_id = PortId(self.next_port_id);
         self.next_port_id += 1;
@@ -372,9 +368,11 @@ impl ArmWorld {
                 }
             }
 
-            // Pressure: scan objects + fixtures for the closest surface,
-            // turn distance into the proximity-falloff signal `(eps - d)/eps`
-            // (clamped >= 0). Iteration is BTreeMap-ordered (deterministic).
+            // Pressure: scan only graspable Objects for the closest surface
+            // (find-grasp-place design §2.2 amended) — Fixtures are support
+            // surfaces, not contact targets, and including them caused
+            // spurious sweep-altitude triggers when joint-space interpolation
+            // dipped EE z toward the table top.
             if !self.sensors_pressure.is_empty() {
                 let ee_point = nalgebra::Point3::from(pose.translation.vector);
                 for pubr in self.sensors_pressure.values_mut() {
@@ -385,12 +383,6 @@ impl ArmWorld {
                     let mut max_pressure = 0.0_f32;
                     for (_, obj) in self.scene.objects() {
                         let d = obj.shape.distance_to_surface(&obj.pose, &ee_point);
-                        if d <= eps {
-                            max_pressure = max_pressure.max((eps - d) / eps);
-                        }
-                    }
-                    for (_, fix) in self.scene.fixtures() {
-                        let d = fix.shape.distance_to_surface(&fix.pose, &ee_point);
                         if d <= eps {
                             max_pressure = max_pressure.max((eps - d) / eps);
                         }
@@ -660,7 +652,11 @@ mod tests {
         let rx = world.attach_pressure_sensor(RateHz::new(1000), 0.03);
         world.publish_sensors_for_dt(Duration::from_millis(1));
         let r = rx.latest().expect("pressure published");
-        assert!(r.pressure.abs() < 1e-6, "expected 0 pressure, got {}", r.pressure);
+        assert!(
+            r.pressure.abs() < 1e-6,
+            "expected 0 pressure, got {}",
+            r.pressure
+        );
     }
 
     #[test]
@@ -682,7 +678,9 @@ mod tests {
             world.scene.insert_object(Object {
                 id: ObjectId(1),
                 pose: Isometry3::translation(ee.x, ee.y, center_z),
-                shape: Shape::Aabb { half_extents: Vector3::new(0.05, 0.05, half_z) },
+                shape: Shape::Aabb {
+                    half_extents: Vector3::new(0.05, 0.05, half_z),
+                },
                 mass: 0.1,
                 graspable: false,
                 state: ObjectState::Free,
@@ -712,7 +710,9 @@ mod tests {
         world.scene.insert_object(Object {
             id: ObjectId(1),
             pose: Isometry3::translation(ee.x, ee.y, ee.z),
-            shape: Shape::Aabb { half_extents: Vector3::new(0.1, 0.1, 0.1) },
+            shape: Shape::Aabb {
+                half_extents: Vector3::new(0.1, 0.1, 0.1),
+            },
             mass: 0.1,
             graspable: false,
             state: ObjectState::Free,
@@ -722,7 +722,11 @@ mod tests {
         world.publish_sensors_for_dt(Duration::from_millis(1));
         let r = rx.latest().expect("pressure published");
         // d = 0 inside the box → (eps - 0)/eps = 1.0.
-        assert!((r.pressure - 1.0).abs() < 1e-6, "expected 1.0, got {}", r.pressure);
+        assert!(
+            (r.pressure - 1.0).abs() < 1e-6,
+            "expected 1.0, got {}",
+            r.pressure
+        );
     }
 
     #[test]
@@ -771,14 +775,19 @@ mod tests {
                     limits: (-PI, PI),
                 }],
                 link_offsets: vec![Isometry3::translation(0.0, 0.0, 0.57)],
-                gripper: GripperSpec { proximity_threshold: 0.05, max_grasp_size: 0.1 },
+                gripper: GripperSpec {
+                    proximity_threshold: 0.05,
+                    max_grasp_size: 0.1,
+                },
             }
         };
         let mut scene = Scene::new(0);
         scene.add_fixture(Fixture {
             id: 0,
             pose: Isometry3::translation(0.0, 0.0, 0.475),
-            shape: Shape::Aabb { half_extents: Vector3::new(0.4, 0.4, 0.025) },
+            shape: Shape::Aabb {
+                half_extents: Vector3::new(0.4, 0.4, 0.025),
+            },
             is_support: true,
         });
         let mut world = ArmWorld::new(scene, spec, /* gravity */ false);

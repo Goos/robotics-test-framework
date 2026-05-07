@@ -160,10 +160,8 @@ pub fn build_search_world(seed: u64) -> ArmWorld {
     use rtf_sim::faults::PcgNoiseSource;
 
     let mut src = PcgNoiseSource::from_seed(seed);
-    let x =
-        SEARCH_REGION_X.0 + src.uniform_unit() * (SEARCH_REGION_X.1 - SEARCH_REGION_X.0);
-    let y =
-        SEARCH_REGION_Y.0 + src.uniform_unit() * (SEARCH_REGION_Y.1 - SEARCH_REGION_Y.0);
+    let x = SEARCH_REGION_X.0 + src.uniform_unit() * (SEARCH_REGION_X.1 - SEARCH_REGION_X.0);
+    let y = SEARCH_REGION_Y.0 + src.uniform_unit() * (SEARCH_REGION_Y.1 - SEARCH_REGION_Y.0);
     // Table top sits at z = 0.475 + 0.025 = 0.5; block sits half its
     // height above that.
     let block_z = 0.5 + BLOCK_HALF_HEIGHT;

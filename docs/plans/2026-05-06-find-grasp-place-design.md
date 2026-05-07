@@ -44,11 +44,18 @@ Scalar (not binary) is chosen for **future-proofing**: the same reading shape ca
 At each `publish_sensors_for_dt`, the world computes:
 
 ```
-pressure = max over (Object | Fixture) o of:
+pressure = max over Object o of:
     let d = distance(EE position, o.shape surface in world frame)
     if d <= ε: (ε - d) / ε
     else: 0.0
 ```
+
+Note: Fixtures are deliberately excluded from the scan. Fixtures are support
+surfaces (table, bin, ground), not contact targets, and including them
+caused spurious sweep-altitude triggers when joint-space interpolation
+dipped EE z toward the table top mid-stripe. Boundary detection against
+fixtures, if needed in a future scenario, would belong on a separate
+sensor type.
 
 Where:
 - `EE position` = `world.ee_pose().translation`.

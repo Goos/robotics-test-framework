@@ -28,11 +28,7 @@ impl Shape {
     /// shape. For `Aabb`, computes distance from the point (in shape-local
     /// frame) to the box; other variants are not yet implemented (the v1.x
     /// pressure sensor only needs Aabb).
-    pub fn distance_to_surface(
-        &self,
-        pose: &Isometry3<f32>,
-        point_world: &Point3<f32>,
-    ) -> f32 {
+    pub fn distance_to_surface(&self, pose: &Isometry3<f32>, point_world: &Point3<f32>) -> f32 {
         match self {
             Shape::Aabb { half_extents } => {
                 let local = pose.inverse() * point_world;
@@ -43,9 +39,9 @@ impl Shape {
                 );
                 (local - nearest).norm()
             }
-            Shape::Sphere { .. } | Shape::Cylinder { .. } => unimplemented!(
-                "distance_to_surface for non-Aabb shapes is not yet needed"
-            ),
+            Shape::Sphere { .. } | Shape::Cylinder { .. } => {
+                unimplemented!("distance_to_surface for non-Aabb shapes is not yet needed")
+            }
         }
     }
 }
@@ -79,7 +75,9 @@ mod tests {
     fn distance_to_aabb_surface_above_box_returns_height_above_top() {
         // Box at origin, half-extents (0.05, 0.05, 0.05). Point 0.05 m above
         // the top face.
-        let s = Shape::Aabb { half_extents: Vector3::new(0.05, 0.05, 0.05) };
+        let s = Shape::Aabb {
+            half_extents: Vector3::new(0.05, 0.05, 0.05),
+        };
         let pose = Isometry3::translation(0.0, 0.0, 0.0);
         let p = Point3::new(0.0, 0.0, 0.10);
         let d = s.distance_to_surface(&pose, &p);
@@ -88,7 +86,9 @@ mod tests {
 
     #[test]
     fn distance_to_aabb_surface_inside_box_returns_zero() {
-        let s = Shape::Aabb { half_extents: Vector3::new(0.05, 0.05, 0.05) };
+        let s = Shape::Aabb {
+            half_extents: Vector3::new(0.05, 0.05, 0.05),
+        };
         let pose = Isometry3::translation(1.0, 2.0, 3.0);
         // Centre of the box is inside.
         let p = Point3::new(1.0, 2.0, 3.0);
@@ -101,7 +101,9 @@ mod tests {
         // Box centered at origin, half-extents (0.1, 0.1, 0.1). Point at
         // (0.2, 0.2, 0.2) — i.e., 0.1 outside each face on the +++ corner.
         // Distance is sqrt(0.1^2 + 0.1^2 + 0.1^2).
-        let s = Shape::Aabb { half_extents: Vector3::new(0.1, 0.1, 0.1) };
+        let s = Shape::Aabb {
+            half_extents: Vector3::new(0.1, 0.1, 0.1),
+        };
         let pose = Isometry3::translation(0.0, 0.0, 0.0);
         let p = Point3::new(0.2, 0.2, 0.2);
         let d = s.distance_to_surface(&pose, &p);
