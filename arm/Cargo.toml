@@ -42,5 +42,9 @@ required-features = ["examples"]
 name = "find_grasp_place"
 required-features = ["examples"]
 
+[[example]]
+name = "continuous_spawn"
+required-features = ["examples"]
+
 [lints]
 workspace = true
