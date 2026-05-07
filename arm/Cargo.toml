@@ -38,5 +38,9 @@ required-features = ["examples"]
 name = "reach_pose_with_faults"
 required-features = ["examples"]
 
+[[example]]
+name = "find_grasp_place"
+required-features = ["examples"]
+
 [lints]
 workspace = true
