@@ -92,6 +92,9 @@ mod tests {
         fn standard_normal(&mut self) -> f32 {
             self.0.next().expect("ran out of fixed draws")
         }
+        fn uniform_unit(&mut self) -> f32 {
+            self.0.next().expect("ran out of fixed draws")
+        }
     }
 
     #[test]
