@@ -48,9 +48,19 @@ pub enum SearchAndPlaceState {
     Failed,
 }
 
-// Step 5 lands only the Sweeping state; target_bin_xy / arm_shoulder_z /
-// l1 / l2 / gripper_tx are wired into the post-contact states in Step 6.
-#[allow(dead_code)]
+/// Block-top z in the find-grasp-place world (table top 0.5 m + block
+/// half-height 0.025). Post-contact descent targets EE here.
+const GRASP_Z: f32 = 0.55;
+/// Park altitude — matches the find-grasp-place sweep_z (kept high enough
+/// above the bin top at z=0.6 for the released block to fall in).
+const PARK_Z: f32 = 0.85;
+/// Ticks to hold the gripper closed before transitioning to Ascend.
+/// Matches PickPlace.
+const CLOSE_HOLD_TICKS: u32 = 200;
+/// Ticks to hold the gripper open before transitioning to Done.
+/// Matches PickPlace.
+const OPEN_HOLD_TICKS: u32 = 200;
+
 pub struct SearchAndPlace<R, P, Pr>
 where
     R: PortReader<JointEncoderReading>,
@@ -191,6 +201,18 @@ where
             && (q1 - target.1).abs() < self.joint_tol
             && (q2 - target.2).abs() < self.joint_tol
     }
+
+    /// Compute (J0, J1, J2) joint target for an EE world xy at altitude `z`.
+    /// J0 is yaw = atan2(y, x); J1, J2 come from the closed-form 2R IK on
+    /// the radial-z plane. Panics on unreachable targets — every call site
+    /// here uses pre-validated geometry (within search region or the bin).
+    fn ik_target_for(&self, xy: (f32, f32), z: f32) -> (f32, f32, f32) {
+        let (x, y) = xy;
+        let r = (x * x + y * y).sqrt();
+        let (j1, j2) = ik_2r(r, z - self.arm_shoulder_z, self.l1, self.l2)
+            .expect("post-contact IK target unreachable — check geometry");
+        (y.atan2(x), j1, j2)
+    }
 }
 
 impl<R, P, Pr> Controller for SearchAndPlace<R, P, Pr>
@@ -232,13 +254,48 @@ where
                     }
                 }
             }
-            // Step 6 fills these in.
-            SearchAndPlaceState::DescendToContact
-            | SearchAndPlaceState::CloseGripper(_)
-            | SearchAndPlaceState::AscendWithBlock
-            | SearchAndPlaceState::YawToBin
-            | SearchAndPlaceState::OpenGripper(_) => {
-                unimplemented!("post-contact state {:?} lands in Step 6", self.state)
+            SearchAndPlaceState::DescendToContact => {
+                let cxy = self.contact_xy.expect("contact_xy set on entry");
+                let target = self.ik_target_for(cxy, GRASP_Z);
+                self.drive_joints_toward(target);
+                if self.joints_converged_to(target) {
+                    self.state = SearchAndPlaceState::CloseGripper(0);
+                }
+            }
+            SearchAndPlaceState::CloseGripper(n) => {
+                self.gripper_tx.send(GripperCommand { close: true });
+                self.halt_joints();
+                self.state = if n >= CLOSE_HOLD_TICKS {
+                    SearchAndPlaceState::AscendWithBlock
+                } else {
+                    SearchAndPlaceState::CloseGripper(n + 1)
+                };
+            }
+            SearchAndPlaceState::AscendWithBlock => {
+                let cxy = self.contact_xy.expect("contact_xy persists after grasp");
+                let target = self.ik_target_for(cxy, PARK_Z);
+                self.gripper_tx.send(GripperCommand { close: true });
+                self.drive_joints_toward(target);
+                if self.joints_converged_to(target) {
+                    self.state = SearchAndPlaceState::YawToBin;
+                }
+            }
+            SearchAndPlaceState::YawToBin => {
+                let target = self.ik_target_for(self.target_bin_xy, PARK_Z);
+                self.gripper_tx.send(GripperCommand { close: true });
+                self.drive_joints_toward(target);
+                if self.joints_converged_to(target) {
+                    self.state = SearchAndPlaceState::OpenGripper(0);
+                }
+            }
+            SearchAndPlaceState::OpenGripper(n) => {
+                self.gripper_tx.send(GripperCommand { close: false });
+                self.halt_joints();
+                self.state = if n >= OPEN_HOLD_TICKS {
+                    SearchAndPlaceState::Done
+                } else {
+                    SearchAndPlaceState::OpenGripper(n + 1)
+                };
             }
             SearchAndPlaceState::Done | SearchAndPlaceState::Failed => {
                 self.halt_joints();
@@ -446,5 +503,113 @@ mod search_and_place_tests {
             rig.c.step(Time::ZERO).unwrap();
         }
         assert!(matches!(rig.c.state(), SearchAndPlaceState::Failed));
+    }
+
+    /// Drive the rig through Sweeping → DescendToContact via a single tick
+    /// where pressure spikes above threshold. Returns the rig in the
+    /// DescendToContact state.
+    fn rig_at_descend(contact_xy: (f32, f32)) -> Rig {
+        let mut rig = make_rig();
+        publish_encoders(&rig, [0.0, 0.0, 0.0]);
+        publish_ee_xy(&rig, contact_xy);
+        publish_pressure(&rig, 0.6);
+        rig.c.step(Time::ZERO).unwrap();
+        assert!(matches!(rig.c.state(), SearchAndPlaceState::DescendToContact));
+        rig
+    }
+
+    #[test]
+    fn descend_transitions_to_close_when_joints_converge() {
+        let cxy = (0.55, 0.10);
+        let mut rig = rig_at_descend(cxy);
+        let target = rig.c.ik_target_for(cxy, GRASP_Z);
+        // Report joints at the descend target.
+        publish_encoders(&rig, [target.0, target.1, target.2]);
+        publish_ee_xy(&rig, cxy);
+        publish_pressure(&rig, 0.6);
+        rig.c.step(Time::ZERO).unwrap();
+        assert!(matches!(rig.c.state(), SearchAndPlaceState::CloseGripper(_)));
+    }
+
+    #[test]
+    fn close_transitions_to_ascend_after_hold_ticks() {
+        let cxy = (0.55, 0.10);
+        let mut rig = rig_at_descend(cxy);
+        let target = rig.c.ik_target_for(cxy, GRASP_Z);
+        publish_encoders(&rig, [target.0, target.1, target.2]);
+        rig.c.step(Time::ZERO).unwrap();
+        assert!(matches!(rig.c.state(), SearchAndPlaceState::CloseGripper(_)));
+        // Hold for >= CLOSE_HOLD_TICKS more steps; encoders + pressure stay
+        // unchanged (Close is a halt state).
+        for _ in 0..(super::CLOSE_HOLD_TICKS + 10) {
+            rig.c.step(Time::ZERO).unwrap();
+        }
+        assert!(matches!(rig.c.state(), SearchAndPlaceState::AscendWithBlock));
+    }
+
+    #[test]
+    fn ascend_transitions_to_yaw_to_bin() {
+        let cxy = (0.55, 0.10);
+        let mut rig = rig_at_descend(cxy);
+        // March to AscendWithBlock.
+        let descend_target = rig.c.ik_target_for(cxy, GRASP_Z);
+        publish_encoders(&rig, [descend_target.0, descend_target.1, descend_target.2]);
+        rig.c.step(Time::ZERO).unwrap();
+        for _ in 0..(super::CLOSE_HOLD_TICKS + 10) {
+            rig.c.step(Time::ZERO).unwrap();
+        }
+        assert!(matches!(rig.c.state(), SearchAndPlaceState::AscendWithBlock));
+        // Now report convergence at the ascend target.
+        let ascend_target = rig.c.ik_target_for(cxy, super::PARK_Z);
+        publish_encoders(&rig, [ascend_target.0, ascend_target.1, ascend_target.2]);
+        rig.c.step(Time::ZERO).unwrap();
+        assert!(matches!(rig.c.state(), SearchAndPlaceState::YawToBin));
+    }
+
+    #[test]
+    fn yaw_to_bin_transitions_to_open_when_yaw_and_joints_converged() {
+        let cxy = (0.55, 0.10);
+        let mut rig = rig_at_descend(cxy);
+        // March to YawToBin.
+        let descend_target = rig.c.ik_target_for(cxy, GRASP_Z);
+        publish_encoders(&rig, [descend_target.0, descend_target.1, descend_target.2]);
+        rig.c.step(Time::ZERO).unwrap();
+        for _ in 0..(super::CLOSE_HOLD_TICKS + 10) {
+            rig.c.step(Time::ZERO).unwrap();
+        }
+        let ascend_target = rig.c.ik_target_for(cxy, super::PARK_Z);
+        publish_encoders(&rig, [ascend_target.0, ascend_target.1, ascend_target.2]);
+        rig.c.step(Time::ZERO).unwrap();
+        assert!(matches!(rig.c.state(), SearchAndPlaceState::YawToBin));
+        // Report joints at the bin target.
+        let bin_target = rig.c.ik_target_for((0.0, 0.6), super::PARK_Z);
+        publish_encoders(&rig, [bin_target.0, bin_target.1, bin_target.2]);
+        rig.c.step(Time::ZERO).unwrap();
+        assert!(matches!(rig.c.state(), SearchAndPlaceState::OpenGripper(_)));
+    }
+
+    #[test]
+    fn open_transitions_to_done() {
+        let cxy = (0.55, 0.10);
+        let mut rig = rig_at_descend(cxy);
+        // March all the way to OpenGripper(0).
+        let descend_target = rig.c.ik_target_for(cxy, GRASP_Z);
+        publish_encoders(&rig, [descend_target.0, descend_target.1, descend_target.2]);
+        rig.c.step(Time::ZERO).unwrap();
+        for _ in 0..(super::CLOSE_HOLD_TICKS + 10) {
+            rig.c.step(Time::ZERO).unwrap();
+        }
+        let ascend_target = rig.c.ik_target_for(cxy, super::PARK_Z);
+        publish_encoders(&rig, [ascend_target.0, ascend_target.1, ascend_target.2]);
+        rig.c.step(Time::ZERO).unwrap();
+        let bin_target = rig.c.ik_target_for((0.0, 0.6), super::PARK_Z);
+        publish_encoders(&rig, [bin_target.0, bin_target.1, bin_target.2]);
+        rig.c.step(Time::ZERO).unwrap();
+        assert!(matches!(rig.c.state(), SearchAndPlaceState::OpenGripper(_)));
+        // Hold open for >= OPEN_HOLD_TICKS.
+        for _ in 0..(super::OPEN_HOLD_TICKS + 10) {
+            rig.c.step(Time::ZERO).unwrap();
+        }
+        assert!(matches!(rig.c.state(), SearchAndPlaceState::Done));
     }
 }
