@@ -59,6 +59,23 @@ pub struct GripperCommand {
     pub close: bool,
 }
 
+/// EE-mounted scalar pressure sensor reading (find-grasp-place design §2).
+/// `pressure` is the proximity-falloff signal `(eps - d) / eps` for the
+/// nearest sim entity, clamped to >= 0; values >= 1.0 mean the EE is at or
+/// inside the surface. Future-proofed as a scalar so noise / multi-finger
+/// extensions don't break the API.
+#[derive(Clone, Debug)]
+pub struct PressureReading {
+    pub pressure: f32,
+    pub sampled_at: Time,
+}
+
+impl SensorReading for PressureReading {
+    fn sampled_at(&self) -> Time {
+        self.sampled_at
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

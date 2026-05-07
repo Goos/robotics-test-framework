@@ -17,6 +17,7 @@ pub use fk::{forward_kinematics, joint_transform};
 pub use pd_controller::PdJointController;
 pub use ports::{
     EePoseReading, GripperCommand, JointEncoderReading, JointId, JointVelocityCommand,
+    PressureReading,
 };
 pub use spec::{ArmSpec, GripperSpec, JointSpec};
 pub use state::ArmState;

@@ -11,6 +11,7 @@ use rtf_sim::sim_clock::SimClock;
 use crate::arm::Arm;
 use crate::ports::{
     EePoseReading, GripperCommand, JointEncoderReading, JointId, JointVelocityCommand,
+    PressureReading,
 };
 use crate::spec::ArmSpec;
 use crate::state::ArmState;
@@ -41,6 +42,16 @@ pub(crate) struct EncoderPublisher {
 pub(crate) struct EePosePublisher {
     pub tx: PortTx<EePoseReading>,
     pub scheduler: RateScheduler,
+}
+
+/// EE-mounted pressure publisher: sender + scheduler + proximity falloff
+/// radius (`eps`). Consumed in `publish_sensors_for_dt` (find-grasp-place
+/// design §2.2).
+#[allow(dead_code)]
+pub(crate) struct PressurePublisher {
+    pub tx: PortTx<PressureReading>,
+    pub scheduler: RateScheduler,
+    pub eps: f32,
 }
 
 /// Per-joint velocity-command receiver. Consumed in Step 3.11c.
@@ -79,6 +90,9 @@ pub struct ArmWorld {
     pub(crate) sensors_joint_encoder: BTreeMap<PortId, EncoderPublisher>,
     /// Filled by `attach_ee_pose_sensor` (Step 3.10); drained in Step 3.11b.
     pub(crate) sensors_ee_pose: BTreeMap<PortId, EePosePublisher>,
+    /// Filled by `attach_pressure_sensor` (find-grasp-place design §2.3);
+    /// drained in `publish_sensors_for_dt`.
+    pub(crate) sensors_pressure: BTreeMap<PortId, PressurePublisher>,
     /// Filled by `attach_joint_velocity_actuator` (Step 3.9); drained in Step 3.11c.
     pub(crate) actuators_joint_velocity: BTreeMap<PortId, JointVelocityConsumer>,
     /// Filled by `attach_gripper_actuator` (Step 3.10); drained in Step 3.11d.
@@ -102,6 +116,7 @@ impl ArmWorld {
             next_port_id: 0,
             sensors_joint_encoder: BTreeMap::new(),
             sensors_ee_pose: BTreeMap::new(),
+            sensors_pressure: BTreeMap::new(),
             actuators_joint_velocity: BTreeMap::new(),
             actuators_gripper: BTreeMap::new(),
         }
@@ -171,6 +186,29 @@ impl ArmWorld {
         self.actuators_gripper
             .insert(port_id, GripperConsumer { rx });
         tx
+    }
+
+    /// Register an EE-mounted pressure sensor publishing at `rate` Hz with
+    /// proximity-falloff radius `eps` (find-grasp-place design §2). Returns
+    /// the receiver end; the world retains the sender + scheduler and pushes
+    /// readings during `publish_sensors`.
+    pub fn attach_pressure_sensor(
+        &mut self,
+        rate: RateHz,
+        eps: f32,
+    ) -> PortRx<PressureReading> {
+        let (tx, rx) = rtf_core::port::port::<PressureReading>();
+        let port_id = PortId(self.next_port_id);
+        self.next_port_id += 1;
+        self.sensors_pressure.insert(
+            port_id,
+            PressurePublisher {
+                tx,
+                scheduler: RateScheduler::new_hz(rate.0),
+                eps,
+            },
+        );
+        rx
     }
 
     /// Register an end-effector pose sensor publishing at `rate` Hz. Returns
@@ -320,7 +358,9 @@ impl ArmWorld {
         // Compute EE pose once per tick (design v2 §5.7 caches FK across all
         // EE-pose subscribers). FK is borrowed before grabbing the mut iter
         // because `values_mut` on `sensors_ee_pose` would alias `&self.arm`.
-        let ee_pose = if self.sensors_ee_pose.is_empty() {
+        // Pressure publishers also need the EE position, so share the same
+        // cached pose.
+        let ee_pose = if self.sensors_ee_pose.is_empty() && self.sensors_pressure.is_empty() {
             None
         } else {
             Some(self.ee_pose())
@@ -329,6 +369,36 @@ impl ArmWorld {
             for pubr in self.sensors_ee_pose.values_mut() {
                 if pubr.scheduler.tick(dt_ns) {
                     pubr.tx.send(EePoseReading { pose, sampled_at });
+                }
+            }
+
+            // Pressure: scan objects + fixtures for the closest surface,
+            // turn distance into the proximity-falloff signal `(eps - d)/eps`
+            // (clamped >= 0). Iteration is BTreeMap-ordered (deterministic).
+            if !self.sensors_pressure.is_empty() {
+                let ee_point = nalgebra::Point3::from(pose.translation.vector);
+                for pubr in self.sensors_pressure.values_mut() {
+                    if !pubr.scheduler.tick(dt_ns) {
+                        continue;
+                    }
+                    let eps = pubr.eps;
+                    let mut max_pressure = 0.0_f32;
+                    for (_, obj) in self.scene.objects() {
+                        let d = obj.shape.distance_to_surface(&obj.pose, &ee_point);
+                        if d <= eps {
+                            max_pressure = max_pressure.max((eps - d) / eps);
+                        }
+                    }
+                    for (_, fix) in self.scene.fixtures() {
+                        let d = fix.shape.distance_to_surface(&fix.pose, &ee_point);
+                        if d <= eps {
+                            max_pressure = max_pressure.max((eps - d) / eps);
+                        }
+                    }
+                    pubr.tx.send(PressureReading {
+                        pressure: max_pressure,
+                        sampled_at,
+                    });
                 }
             }
         }
@@ -580,6 +650,146 @@ mod tests {
         );
         let ee = world.ee_pose();
         assert!((pose_after.translation.vector - ee.translation.vector).norm() < 1e-4);
+    }
+
+    #[test]
+    fn pressure_sensor_zero_when_no_object_nearby() {
+        // Empty scene (no ground, no fixtures, no objects); pressure sensor
+        // sees nothing and reports 0.
+        let mut world = ArmWorld::new(Scene::new(0), simple_spec(), true);
+        let rx = world.attach_pressure_sensor(RateHz::new(1000), 0.03);
+        world.publish_sensors_for_dt(Duration::from_millis(1));
+        let r = rx.latest().expect("pressure published");
+        assert!(r.pressure.abs() < 1e-6, "expected 0 pressure, got {}", r.pressure);
+    }
+
+    #[test]
+    fn pressure_sensor_falls_off_linearly_with_distance() {
+        use nalgebra::{Isometry3, Vector3};
+        use rtf_sim::object::{Object, ObjectId, ObjectState};
+        use rtf_sim::shape::Shape;
+
+        // EE for simple_spec sits at world origin (0, 0, 0.2).
+        // Place a thin Aabb directly below the EE so the EE-to-surface
+        // distance is exactly d. Top of box sits at (z = ee.z - d).
+        let eps = 0.03_f32;
+        for d in [0.0_f32, 0.005, 0.01, 0.02, 0.029] {
+            let mut world = ArmWorld::new(Scene::new(0), simple_spec(), true);
+            let ee = world.ee_pose().translation.vector;
+            let top_z = ee.z - d;
+            let half_z = 0.05;
+            let center_z = top_z - half_z;
+            world.scene.insert_object(Object {
+                id: ObjectId(1),
+                pose: Isometry3::translation(ee.x, ee.y, center_z),
+                shape: Shape::Aabb { half_extents: Vector3::new(0.05, 0.05, half_z) },
+                mass: 0.1,
+                graspable: false,
+                state: ObjectState::Free,
+                lin_vel: Vector3::zeros(),
+            });
+            let rx = world.attach_pressure_sensor(RateHz::new(1000), eps);
+            world.publish_sensors_for_dt(Duration::from_millis(1));
+            let r = rx.latest().expect("pressure published");
+            let expected = (eps - d) / eps;
+            assert!(
+                (r.pressure - expected).abs() < 1e-4,
+                "d={d}: expected {expected}, got {}",
+                r.pressure
+            );
+        }
+    }
+
+    #[test]
+    fn pressure_sensor_saturates_inside_object() {
+        use nalgebra::{Isometry3, Vector3};
+        use rtf_sim::object::{Object, ObjectId, ObjectState};
+        use rtf_sim::shape::Shape;
+
+        let mut world = ArmWorld::new(Scene::new(0), simple_spec(), true);
+        let ee = world.ee_pose().translation.vector;
+        // Box centered at the EE — the EE is well inside it.
+        world.scene.insert_object(Object {
+            id: ObjectId(1),
+            pose: Isometry3::translation(ee.x, ee.y, ee.z),
+            shape: Shape::Aabb { half_extents: Vector3::new(0.1, 0.1, 0.1) },
+            mass: 0.1,
+            graspable: false,
+            state: ObjectState::Free,
+            lin_vel: Vector3::zeros(),
+        });
+        let rx = world.attach_pressure_sensor(RateHz::new(1000), 0.03);
+        world.publish_sensors_for_dt(Duration::from_millis(1));
+        let r = rx.latest().expect("pressure published");
+        // d = 0 inside the box → (eps - 0)/eps = 1.0.
+        assert!((r.pressure - 1.0).abs() < 1e-6, "expected 1.0, got {}", r.pressure);
+    }
+
+    #[test]
+    fn pressure_sensor_publishes_at_configured_rate() {
+        // Attach at 100 Hz, pump 50 ms of sim time → expect 5 ticks.
+        // We don't have an easy way to count sends through a single-slot
+        // port, so step in 1ms increments and count distinct sample
+        // timestamps observed via `latest()`.
+        let mut world = ArmWorld::new(Scene::new(0), simple_spec(), true);
+        let rx = world.attach_pressure_sensor(RateHz::new(100), 0.03);
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..50 {
+            world.consume_actuators_and_integrate_inner(Duration::from_millis(1));
+            world.publish_sensors_for_dt(Duration::from_millis(1));
+            if let Some(r) = rx.latest() {
+                seen.insert(r.sampled_at.as_nanos());
+            }
+        }
+        assert_eq!(
+            seen.len(),
+            5,
+            "expected 5 distinct publish times in 50ms at 100Hz, got {}: {:?}",
+            seen.len(),
+            seen
+        );
+    }
+
+    #[test]
+    fn pressure_sensor_does_not_fire_at_sweep_altitude() {
+        // Find-grasp-place sanity check: a table at z in [0.45, 0.50] (top at
+        // 0.50) plus an EE at z = 0.57 (sweep_z) should be 7 cm above the
+        // table top — far outside eps=0.03, so the table fixture must not
+        // trigger any pressure.
+        use nalgebra::{Isometry3, Vector3};
+        use rtf_sim::fixture::Fixture;
+        use rtf_sim::shape::Shape;
+
+        // Build a simple 1-joint arm with a single 0.57m z-link so the EE
+        // sits at z=0.57 (matches the find-grasp-place sweep altitude).
+        let spec = {
+            use crate::spec::{ArmSpec, GripperSpec, JointSpec};
+            use core::f32::consts::PI;
+            ArmSpec {
+                joints: vec![JointSpec::Revolute {
+                    axis: Vector3::z_axis(),
+                    limits: (-PI, PI),
+                }],
+                link_offsets: vec![Isometry3::translation(0.0, 0.0, 0.57)],
+                gripper: GripperSpec { proximity_threshold: 0.05, max_grasp_size: 0.1 },
+            }
+        };
+        let mut scene = Scene::new(0);
+        scene.add_fixture(Fixture {
+            id: 0,
+            pose: Isometry3::translation(0.0, 0.0, 0.475),
+            shape: Shape::Aabb { half_extents: Vector3::new(0.4, 0.4, 0.025) },
+            is_support: true,
+        });
+        let mut world = ArmWorld::new(scene, spec, /* gravity */ false);
+        let rx = world.attach_pressure_sensor(RateHz::new(1000), 0.03);
+        world.publish_sensors_for_dt(Duration::from_millis(1));
+        let r = rx.latest().expect("pressure published");
+        assert!(
+            r.pressure.abs() < 1e-6,
+            "table top should be 7cm below sweep_z (well outside eps=0.03), got pressure={}",
+            r.pressure
+        );
     }
 
     #[test]
