@@ -6,6 +6,7 @@ pub mod examples_;
 pub mod fk;
 pub mod goals;
 pub mod ik;
+pub mod pd_controller;
 pub mod ports;
 pub mod spec;
 pub mod state;
@@ -15,6 +16,7 @@ pub mod world;
 
 pub use arm::Arm;
 pub use fk::{forward_kinematics, joint_transform};
+pub use pd_controller::PdJointController;
 pub use ports::{
     EePoseReading, GripperCommand, JointEncoderReading, JointId, JointVelocityCommand,
 };

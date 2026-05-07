@@ -6,8 +6,8 @@
 #![cfg(feature = "e2e")]
 
 use rtf_arm::{
-    examples_::PdJointController, fk::forward_kinematics, goals::reach_pose::ReachPose,
-    test_helpers::build_simple_arm_world,
+    fk::forward_kinematics, goals::reach_pose::ReachPose, test_helpers::build_simple_arm_world,
+    PdJointController,
 };
 use rtf_core::time::Duration;
 use rtf_harness::{run, RunConfig, Termination};

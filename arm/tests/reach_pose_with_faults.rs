@@ -9,12 +9,12 @@
 use std::rc::Rc;
 
 use rtf_arm::{
-    examples_::PdJointController,
     fk::forward_kinematics,
     goals::reach_pose::ReachPose,
     ports::{JointEncoderReading, JointId},
     test_helpers::build_simple_arm_world,
     world::RateHz,
+    PdJointController,
 };
 use rtf_core::{clock::Clock, port::PortReader, time::Duration};
 use rtf_harness::{run, RunConfig, Termination};
