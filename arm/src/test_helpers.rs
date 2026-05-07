@@ -1,6 +1,6 @@
-//! Test helpers — gated like `examples_` (cfg(test) or feature = "examples").
-//! Builders for the canonical Phase 5 happy-path arm setup so end-to-end
-//! tests don't have to repeat boilerplate.
+//! Test helpers — gated by `cfg(test)` or `feature = "examples"`. Builders
+//! for the canonical Phase 5 happy-path arm setup so example scenarios and
+//! integration tests don't have to repeat boilerplate.
 
 use nalgebra::{Isometry3, Vector3};
 use rtf_core::port::{PortReader, PortRx, PortTx};

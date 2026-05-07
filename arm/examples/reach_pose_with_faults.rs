@@ -1,10 +1,14 @@
-//! Step 9.6: Robustness end-to-end — PD controller still reaches the target
-//! pose when each encoder is wrapped with GaussianNoise (sigma=5e-3 rad)
-//! followed by Delay (2 ms latency). Validates that the fault wrappers
-//! satisfy `Box<dyn PortReader<JointEncoderReading>>` (Step 9.1) and that
-//! the PD gains are robust enough to absorb light sensor faults.
-
-#![cfg(feature = "e2e")]
+//! Step 9.6 robustness scenario: PD controller still reaches the target pose
+//! when each encoder is wrapped with GaussianNoise (sigma=5e-3 rad) followed
+//! by Delay (2 ms latency). Validates that the fault wrappers satisfy
+//! `Box<dyn PortReader<JointEncoderReading>>` and that the PD gains are
+//! robust enough to absorb light sensor faults.
+//!
+//! Run terminal-only:
+//!   `cargo run --example reach_pose_with_faults --features examples`
+//!
+//! Run as a test:
+//!   `cargo test --example reach_pose_with_faults --features examples`
 
 use std::rc::Rc;
 
@@ -17,11 +21,12 @@ use rtf_arm::{
     PdJointController,
 };
 use rtf_core::{clock::Clock, port::PortReader, time::Duration};
-use rtf_harness::{run, RunConfig, Termination};
+#[cfg(test)]
+use rtf_harness::Termination;
+use rtf_harness::{run, RunConfig};
 use rtf_sim::faults::{Delay, GaussianNoise};
 
-#[test]
-fn pd_still_reaches_target_with_2ms_encoder_delay_and_noise() {
+fn run_reach_pose_with_faults_default() -> rtf_harness::RunResult {
     let mut world = build_simple_arm_world(3);
     let raw_clock = world.sim_clock_handle();
     let clock_dyn: Rc<dyn Clock> = raw_clock.clone();
@@ -55,7 +60,22 @@ fn pd_still_reaches_target_with_2ms_encoder_delay_and_noise() {
         .with_tick_rate(1000)
         .with_seed(42);
 
-    let res = run(world, controller, goal, cfg);
+    run(world, controller, goal, cfg)
+}
+
+fn main() {
+    let res = run_reach_pose_with_faults_default();
+    println!(
+        "ReachPose+faults: terminated_by={:?}, final_time_ns={}, score={}",
+        res.terminated_by,
+        res.final_time.as_nanos(),
+        res.score.value,
+    );
+}
+
+#[test]
+fn pd_still_reaches_target_with_2ms_encoder_delay_and_noise() {
+    let res = run_reach_pose_with_faults_default();
     eprintln!(
         "e2e (faults): terminated_by={:?}, final_time_ns={}, score={}",
         res.terminated_by,

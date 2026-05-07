@@ -1,0 +1,6 @@
+# Workspace-wide Cargo aliases.
+
+[alias]
+# Run unit tests + integration tests + every example's #[test] block, with
+# all features enabled. The recommended one-shot CI invocation.
+test-all = "test --workspace --all-targets --features viz-rerun"

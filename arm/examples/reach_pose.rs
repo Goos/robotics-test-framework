@@ -1,19 +1,24 @@
-//! End-to-end smoke test (Phase 5 milestone): PD controller reaches a 3-joint
-//! target pose within 2 seconds. First test that exercises the full pipeline:
+//! Phase 5 milestone scenario: PD controller reaches a 3-joint target pose
+//! within 2 seconds. First scenario that exercises the full pipeline:
 //! ArmWorld → harness tick loop → PdJointController → ReachPose goal →
 //! GoalComplete termination.
-
-#![cfg(feature = "e2e")]
+//!
+//! Run terminal-only:
+//!   `cargo run --example reach_pose --features examples`
+//!
+//! Run as a test:
+//!   `cargo test --example reach_pose --features examples`
 
 use rtf_arm::{
     fk::forward_kinematics, goals::reach_pose::ReachPose, test_helpers::build_simple_arm_world,
     PdJointController,
 };
 use rtf_core::time::Duration;
-use rtf_harness::{run, RunConfig, Termination};
+#[cfg(test)]
+use rtf_harness::Termination;
+use rtf_harness::{run, RunConfig};
 
-#[test]
-fn pd_reaches_target_pose_within_2_seconds() {
+fn run_reach_pose_default() -> rtf_harness::RunResult {
     let mut world = build_simple_arm_world(3);
     let ports = world.attach_standard_arm_ports();
 
@@ -28,7 +33,22 @@ fn pd_reaches_target_pose_within_2_seconds() {
         .with_tick_rate(1000)
         .with_seed(42);
 
-    let res = run(world, controller, goal, cfg);
+    run(world, controller, goal, cfg)
+}
+
+fn main() {
+    let res = run_reach_pose_default();
+    println!(
+        "ReachPose: terminated_by={:?}, final_time_ns={}, score={}",
+        res.terminated_by,
+        res.final_time.as_nanos(),
+        res.score.value,
+    );
+}
+
+#[test]
+fn pd_reaches_target_pose_within_2_seconds() {
+    let res = run_reach_pose_default();
     eprintln!(
         "e2e: terminated_by={:?}, final_time_ns={}, score={}",
         res.terminated_by,

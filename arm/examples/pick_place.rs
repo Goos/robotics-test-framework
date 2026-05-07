@@ -1,18 +1,35 @@
-//! Example controllers and (later) test helpers, gated behind the `examples`
-//! feature or `cfg(test)`. Trailing underscore avoids confusion with cargo's
-//! `examples/` directory convention — this is a regular library module, not
-//! an example binary.
+//! Headline acceptance scenario for v1: a Z-Y-Y arm yaws over a block,
+//! descends, grasps, ascends, swings to a bin, and releases.
+//!
+//! Run terminal-only:
+//!   `cargo run --example pick_place --features examples`
+//!
+//! Run as a test:
+//!   `cargo test --example pick_place --features examples`
+//!
+//! Save a rerun .rrd for visual inspection (requires the `viz-rerun` feature):
+//!   `cargo test --example pick_place --features viz-rerun \
+//!      pick_place_save_rrd -- --nocapture`
+//! Then view with `rerun <printed-path>` (install once via
+//! `cargo install rerun-cli --version 0.21`).
 
+use rtf_arm::{
+    goals::PlaceInBin,
+    ik::ik_2r,
+    ports::{EePoseReading, GripperCommand, JointEncoderReading, JointId, JointVelocityCommand},
+    test_helpers::{bin_id, block_id, build_pick_and_place_world},
+    RateHz,
+};
 use rtf_core::{
     controller::{ControlError, Controller},
     port::{PortReader, PortTx},
-    time::Time,
+    time::{Duration, Time},
 };
+#[cfg(test)]
+use rtf_harness::Termination;
+use rtf_harness::{run, RunConfig};
 
-use crate::ik::ik_2r;
-use crate::ports::{
-    EePoseReading, GripperCommand, JointEncoderReading, JointId, JointVelocityCommand,
-};
+// -- Controller ----------------------------------------------------------
 
 /// Pick-and-place state-machine controller for a Z-Y-Y arm. Yaws J0 over the
 /// block, descends J1+J2 via 2R IK, closes the gripper, ascends, swings J0
@@ -245,6 +262,143 @@ where
     }
 }
 
+// -- Runner --------------------------------------------------------------
+
+fn run_pick_place_default() -> rtf_harness::RunResult {
+    let mut world = build_pick_and_place_world();
+    let ports = world.attach_standard_arm_ports();
+    let ee_pose_rx = world.attach_ee_pose_sensor(RateHz::new(100));
+    let block = block_id(&world);
+    let bin = bin_id(&world);
+
+    let controller = PickPlace::new(
+        ports.encoder_rxs,
+        ee_pose_rx,
+        ports.velocity_txs,
+        ports.gripper_tx,
+        /* target_block_xy */ (0.6, 0.0),
+        /* target_bin_xy */ (0.0, 0.6),
+        /* arm_shoulder_z */ 0.8,
+        /* l1 */ 0.4,
+        /* l2 */ 0.4,
+    );
+    let goal = PlaceInBin::new(block, bin);
+
+    let cfg = RunConfig::default()
+        .with_deadline(Duration::from_secs(15))
+        .with_seed(42);
+
+    run(world, controller, goal, cfg)
+}
+
+fn main() {
+    let res = run_pick_place_default();
+    println!(
+        "PickPlace: terminated_by={:?}, final_time={:?}, score={}",
+        res.terminated_by, res.final_time, res.score.value,
+    );
+}
+
+// -- Tests ---------------------------------------------------------------
+
+#[test]
+fn state_machine_picks_block_and_drops_in_bin() {
+    let res = run_pick_place_default();
+    eprintln!(
+        "e2e PickPlace: terminated_by={:?}, final_time={:?}, score={}",
+        res.terminated_by, res.final_time, res.score.value,
+    );
+    assert!(
+        matches!(res.terminated_by, Termination::GoalComplete),
+        "did not converge in 15s; final score={}, terminated_by={:?}",
+        res.score.value,
+        res.terminated_by,
+    );
+    assert!(res.score.value > 0.9);
+}
+
+#[cfg(feature = "viz-rerun")]
+#[test]
+fn state_machine_picks_block_and_drops_in_bin_with_rerun() {
+    use rtf_viz::RerunRecorder;
+
+    let rec = RerunRecorder::in_memory("pick_place").unwrap();
+
+    let mut world = build_pick_and_place_world();
+    let ports = world.attach_standard_arm_ports();
+    let ee_pose_rx = world.attach_ee_pose_sensor(RateHz::new(100));
+    let block = block_id(&world);
+    let bin = bin_id(&world);
+
+    let controller = PickPlace::new(
+        ports.encoder_rxs,
+        ee_pose_rx,
+        ports.velocity_txs,
+        ports.gripper_tx,
+        (0.6, 0.0),
+        (0.0, 0.6),
+        0.8,
+        0.4,
+        0.4,
+    );
+    let goal = PlaceInBin::new(block, bin);
+
+    let cfg = RunConfig::default()
+        .with_deadline(Duration::from_secs(15))
+        .with_seed(42)
+        .with_recorder(rec);
+
+    let res = run(world, controller, goal, cfg);
+    assert!(
+        matches!(res.terminated_by, Termination::GoalComplete),
+        "did not converge with rerun recorder; final score = {}",
+        res.score.value,
+    );
+}
+
+#[cfg(feature = "viz-rerun")]
+#[test]
+fn pick_place_save_rrd() {
+    use rtf_viz::RerunRecorder;
+
+    let path = std::env::temp_dir().join("pick_place.rrd");
+    let _ = std::fs::remove_file(&path);
+    let rec = RerunRecorder::save_to_file(&path, "pick_place").unwrap();
+
+    let mut world = build_pick_and_place_world();
+    let ports = world.attach_standard_arm_ports();
+    let ee_pose_rx = world.attach_ee_pose_sensor(RateHz::new(100));
+    let block = block_id(&world);
+    let bin = bin_id(&world);
+
+    let controller = PickPlace::new(
+        ports.encoder_rxs,
+        ee_pose_rx,
+        ports.velocity_txs,
+        ports.gripper_tx,
+        (0.6, 0.0),
+        (0.0, 0.6),
+        0.8,
+        0.4,
+        0.4,
+    );
+    let goal = PlaceInBin::new(block, bin);
+
+    let cfg = RunConfig::default()
+        .with_deadline(Duration::from_secs(15))
+        .with_seed(42)
+        .with_recorder(rec);
+
+    let res = run(world, controller, goal, cfg);
+    eprintln!("Saved rrd file to: {:?}", path);
+    eprintln!("View with: rerun {:?}", path);
+    assert!(
+        matches!(res.terminated_by, Termination::GoalComplete),
+        "did not converge while saving rrd; final score = {}",
+        res.score.value,
+    );
+}
+
 #[cfg(test)]
 mod pick_place_tests {
     use super::*;
@@ -319,8 +473,6 @@ mod pick_place_tests {
     #[test]
     fn approach_yaw_advances_when_yaw_and_pitches_converged() {
         let mut rig = make_rig();
-        // EE already aligned with block xy=(0.6, 0): yaw target = atan2(0, 0.6) = 0.
-        // Place EE on +x to make ee_heading = 0 too.
         publish_ee_xy(&rig, (0.6, 0.0));
         publish_encoders(&rig, [0.0, 0.0, 0.0]);
         rig.c.step(Time::ZERO).unwrap();
@@ -330,7 +482,6 @@ mod pick_place_tests {
     #[test]
     fn approach_yaw_stays_when_yaw_off() {
         let mut rig = make_rig();
-        // Force a yaw misalignment: EE heading is +y but block is at +x.
         publish_ee_xy(&rig, (0.0, 0.6));
         publish_encoders(&rig, [0.0, 0.0, 0.0]);
         rig.c.step(Time::ZERO).unwrap();
@@ -340,12 +491,10 @@ mod pick_place_tests {
     #[test]
     fn descend_over_block_transitions_to_close_when_pitches_converged() {
         let mut rig = make_rig();
-        // Force state to DescendOverBlock by publishing aligned EE first.
         publish_ee_xy(&rig, (0.6, 0.0));
         publish_encoders(&rig, [0.0, 0.0, 0.0]);
         rig.c.step(Time::ZERO).unwrap();
         assert!(matches!(rig.c.state(), PickPlaceState::DescendOverBlock));
-        // Now report the IK target for at_block on the encoders.
         let (j1, j2) = rig.c.ik_at_block;
         publish_encoders(&rig, [0.0, j1, j2]);
         rig.c.step(Time::ZERO).unwrap();
@@ -371,7 +520,6 @@ mod pick_place_tests {
     #[test]
     fn ascend_transitions_to_yaw_to_bin_when_pitches_converged() {
         let mut rig = make_rig();
-        // Drive through Approach → Descend → Close → Ascend.
         publish_ee_xy(&rig, (0.6, 0.0));
         publish_encoders(&rig, [0.0, 0.0, 0.0]);
         rig.c.step(Time::ZERO).unwrap();
@@ -382,7 +530,6 @@ mod pick_place_tests {
             rig.c.step(Time::ZERO).unwrap();
         }
         assert!(matches!(rig.c.state(), PickPlaceState::AscendWithBlock));
-        // Now report converged-up encoders.
         let (j1_up, j2_up) = rig.c.ik_above_block;
         publish_encoders(&rig, [0.0, j1_up, j2_up]);
         rig.c.step(Time::ZERO).unwrap();
@@ -392,7 +539,6 @@ mod pick_place_tests {
     #[test]
     fn yaw_to_bin_transitions_to_open_when_yaw_and_pitches_converged() {
         let mut rig = make_rig();
-        // Drive to YawToBin via the chain.
         publish_ee_xy(&rig, (0.6, 0.0));
         publish_encoders(&rig, [0.0, 0.0, 0.0]);
         rig.c.step(Time::ZERO).unwrap();
@@ -406,7 +552,6 @@ mod pick_place_tests {
         publish_encoders(&rig, [0.0, j1_up, j2_up]);
         rig.c.step(Time::ZERO).unwrap();
         assert!(matches!(rig.c.state(), PickPlaceState::YawToBin));
-        // EE now reports xy=(0, 0.6) — bin yaw target. Encoders at above_bin IK.
         publish_ee_xy(&rig, (0.0, 0.6));
         let (j1_bin, j2_bin) = rig.c.ik_above_bin;
         publish_encoders(&rig, [core::f32::consts::FRAC_PI_2, j1_bin, j2_bin]);
