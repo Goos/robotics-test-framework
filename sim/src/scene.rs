@@ -58,6 +58,15 @@ impl Scene {
         self.objects.insert(obj.id, obj);
     }
 
+    /// Allocate the next monotonic ObjectId without inserting anything.
+    /// Used by run-time spawn schedules so each injected object gets a
+    /// fresh distinct id.
+    pub fn allocate_object_id(&mut self) -> ObjectId {
+        let id = ObjectId(self.next_object_id);
+        self.next_object_id += 1;
+        id
+    }
+
     /// Look up an object by id (immutable).
     pub fn object(&self, id: ObjectId) -> Option<&Object> {
         self.objects.get(&id)

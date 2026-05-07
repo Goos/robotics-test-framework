@@ -1,9 +1,10 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::rc::Rc;
 
 use rtf_core::port::{PortRx, PortTx};
 use rtf_core::port_id::PortId;
 use rtf_core::time::{Duration, Time};
+use rtf_sim::object::Object;
 use rtf_sim::rate_scheduler::RateScheduler;
 use rtf_sim::scene::Scene;
 use rtf_sim::sim_clock::SimClock;
@@ -15,6 +16,16 @@ use crate::ports::{
 };
 use crate::spec::ArmSpec;
 use crate::state::ArmState;
+
+/// Deferred Object insertion: pop from the schedule the first time the
+/// world's sim time is at or past `at`, allocate a fresh `ObjectId` from
+/// the scene's monotonic counter, and insert. The `template.id` field is
+/// ignored — every spawn gets a freshly allocated id so callers can't
+/// accidentally collide with other scheduled spawns.
+struct PendingSpawn {
+    at: Time,
+    template: Object,
+}
 
 /// Sample rate (Hz) for a sensor port. Newtype to keep call-sites
 /// self-documenting and to allow attach helpers to compose with `RateScheduler`.
@@ -97,6 +108,10 @@ pub struct ArmWorld {
     pub(crate) actuators_joint_velocity: BTreeMap<PortId, JointVelocityConsumer>,
     /// Filled by `attach_gripper_actuator` (Step 3.10); drained in Step 3.11d.
     pub(crate) actuators_gripper: BTreeMap<PortId, GripperConsumer>,
+    /// Sorted by `at` (earliest first) so the per-tick drain only needs to
+    /// peek the front. Spawns are processed at the end of
+    /// `consume_actuators_and_integrate_inner`, after sim_time advances.
+    pending_spawns: VecDeque<PendingSpawn>,
 }
 
 impl ArmWorld {
@@ -119,6 +134,7 @@ impl ArmWorld {
             sensors_pressure: BTreeMap::new(),
             actuators_joint_velocity: BTreeMap::new(),
             actuators_gripper: BTreeMap::new(),
+            pending_spawns: VecDeque::new(),
         }
     }
 
@@ -138,6 +154,28 @@ impl ArmWorld {
     /// single-threaded contract (no `Send`/`Sync` on `SimClock`).
     pub fn sim_clock_handle(&self) -> Rc<SimClock> {
         Rc::clone(&self.sim_clock)
+    }
+
+    /// Schedule an Object to be inserted into the scene at sim time `at`.
+    /// The `template.id` field is ignored — the world allocates a fresh
+    /// ObjectId from the scene's monotonic counter at spawn time so
+    /// schedule entries can never collide.
+    ///
+    /// Spawns are kept sorted by `at` (earliest first) so the per-tick
+    /// drain in `consume_actuators_and_integrate_inner` only needs to peek
+    /// the front. Order among entries with equal `at` follows insertion
+    /// order (deterministic; design v2 §10.2).
+    pub fn schedule_spawn(&mut self, at: Time, template: Object) {
+        let entry = PendingSpawn { at, template };
+        // Find the first existing spawn with `at` strictly later than
+        // the new one and insert just before it; preserves insertion
+        // order among equal-time entries.
+        let pos = self
+            .pending_spawns
+            .iter()
+            .position(|s| s.at > entry.at)
+            .unwrap_or(self.pending_spawns.len());
+        self.pending_spawns.insert(pos, entry);
     }
 
     /// Register a joint-encoder sensor on `joint` publishing at `rate` Hz.
@@ -283,6 +321,19 @@ impl ArmWorld {
         // Advance authoritative sim time and the shared clock together.
         self.sim_time = self.sim_time + dt;
         self.sim_clock.advance(dt);
+
+        // Process any pending spawns whose `at` time has now elapsed.
+        // Scheduled spawns that are due now are inserted in (at, insertion
+        // order) — pending_spawns is kept sorted by `at` so we just drain
+        // from the front.
+        while let Some(spawn) = self.pending_spawns.front() {
+            if spawn.at > self.sim_time {
+                break;
+            }
+            let mut spawn = self.pending_spawns.pop_front().unwrap();
+            spawn.template.id = self.scene.allocate_object_id();
+            self.scene.insert_object(spawn.template);
+        }
     }
 
     /// Apply a single gripper command — flip `gripper_closed`, then handle the
@@ -834,5 +885,93 @@ mod tests {
             world.scene.object(block).unwrap().state,
             ObjectState::Settled { .. }
         ));
+    }
+
+    /// Build a minimal Object template for spawn tests; id is overwritten
+    /// at spawn time by the world.
+    fn block_template() -> Object {
+        use nalgebra::{Isometry3, Vector3};
+        use rtf_sim::object::{Object, ObjectId, ObjectState};
+        use rtf_sim::shape::Shape;
+        Object {
+            id: ObjectId(0),
+            pose: Isometry3::translation(0.5, 0.0, 1.0),
+            shape: Shape::Aabb {
+                half_extents: Vector3::new(0.025, 0.025, 0.025),
+            },
+            mass: 0.1,
+            graspable: true,
+            state: ObjectState::Free,
+            lin_vel: Vector3::zeros(),
+        }
+    }
+
+    #[test]
+    fn schedule_spawn_inserts_at_due_time() {
+        let mut world = ArmWorld::new(Scene::new(0), simple_spec(), false);
+        world.schedule_spawn(Time::from_millis(10), block_template());
+        // Step 5 ms — not yet due, no insert.
+        world.consume_actuators_and_integrate_inner(Duration::from_millis(5));
+        assert_eq!(world.scene.objects().count(), 0);
+        // Step 5 more ms — at exactly 10 ms now, due, insert fires.
+        world.consume_actuators_and_integrate_inner(Duration::from_millis(5));
+        assert_eq!(world.scene.objects().count(), 1);
+    }
+
+    #[test]
+    fn schedule_spawn_assigns_unique_ids() {
+        let mut world = ArmWorld::new(Scene::new(0), simple_spec(), false);
+        for _ in 0..3 {
+            world.schedule_spawn(Time::from_millis(1), block_template());
+        }
+        world.consume_actuators_and_integrate_inner(Duration::from_millis(2));
+        let ids: std::collections::BTreeSet<_> =
+            world.scene.objects().map(|(id, _)| *id).collect();
+        assert_eq!(ids.len(), 3, "expected 3 distinct ids, got {ids:?}");
+    }
+
+    #[test]
+    fn schedule_spawn_processes_in_time_order() {
+        // Schedule three spawns out of order; verify they fire in time order
+        // and that each batch up-to-now is fully consumed before the next
+        // step. Use distinct pose.x values per template so we can tell which
+        // spawn produced each inserted object after the fact.
+        use nalgebra::Translation3;
+        let mut world = ArmWorld::new(Scene::new(0), simple_spec(), false);
+        let mut t30 = block_template();
+        t30.pose.translation = Translation3::new(0.30, 0.0, 1.0);
+        let mut t10 = block_template();
+        t10.pose.translation = Translation3::new(0.10, 0.0, 1.0);
+        let mut t20 = block_template();
+        t20.pose.translation = Translation3::new(0.20, 0.0, 1.0);
+        world.schedule_spawn(Time::from_millis(30), t30);
+        world.schedule_spawn(Time::from_millis(10), t10);
+        world.schedule_spawn(Time::from_millis(20), t20);
+        // Step to t=10ms → only the t=10 spawn fires.
+        world.consume_actuators_and_integrate_inner(Duration::from_millis(10));
+        let xs: Vec<f32> = world
+            .scene
+            .objects()
+            .map(|(_, o)| o.pose.translation.x)
+            .collect();
+        assert_eq!(xs, vec![0.10]);
+        // Step to t=20ms → t=20 fires.
+        world.consume_actuators_and_integrate_inner(Duration::from_millis(10));
+        let mut xs: Vec<f32> = world
+            .scene
+            .objects()
+            .map(|(_, o)| o.pose.translation.x)
+            .collect();
+        xs.sort_by(f32::total_cmp);
+        assert_eq!(xs, vec![0.10, 0.20]);
+        // Step to t=30ms → t=30 fires.
+        world.consume_actuators_and_integrate_inner(Duration::from_millis(10));
+        let mut xs: Vec<f32> = world
+            .scene
+            .objects()
+            .map(|(_, o)| o.pose.translation.x)
+            .collect();
+        xs.sort_by(f32::total_cmp);
+        assert_eq!(xs, vec![0.10, 0.20, 0.30]);
     }
 }
