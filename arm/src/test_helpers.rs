@@ -23,6 +23,17 @@ use crate::{
 pub const BLOCK_OBJECT_ID: ObjectId = ObjectId(1);
 pub const BIN_FIXTURE_ID: u32 = 2;
 
+/// Search region (find-grasp-place design §3.3) — Aabb on the table top
+/// where the seeded block is placed by [`build_search_world`]. Selected so
+/// every point is reachable by the standard Z-Y-Y arm and disjoint from the
+/// bin xy.
+pub const SEARCH_REGION_X: (f32, f32) = (0.40, 0.70);
+pub const SEARCH_REGION_Y: (f32, f32) = (-0.25, 0.25);
+/// Block top z (table top + block half-height). Convenience for callers that
+/// pre-compute IK targets at grasp altitude.
+pub const SEARCH_REGION_Z: f32 = 0.55;
+pub const BLOCK_HALF_HEIGHT: f32 = 0.025;
+
 /// Build an `ArmWorld` with `n_joints` z-axis revolute joints, 0.2 m **x-axis**
 /// link offsets, default gripper (proximity 0.02, max_grasp 0.05), gravity
 /// OFF (Phase 5 doesn't model gravity). Seeded `Scene::new(0)` for
@@ -135,6 +146,91 @@ pub fn bin_id(_world: &ArmWorld) -> u32 {
     BIN_FIXTURE_ID
 }
 
+/// Build the find-grasp-place world: same arm + table + bin as
+/// [`build_pick_and_place_world`], but the block xy is sampled uniformly
+/// from the search region (see [`SEARCH_REGION_X`] / [`SEARCH_REGION_Y`])
+/// using a `PcgNoiseSource` seeded with `seed`. Same seed → byte-identical
+/// world; different seeds → different block xy.
+///
+/// The controller is given the region bounds at construction; it does NOT
+/// know the actual block xy.
+pub fn build_search_world(seed: u64) -> ArmWorld {
+    use core::f32::consts::PI;
+    use rtf_core::noise_source::NoiseSource;
+    use rtf_sim::faults::PcgNoiseSource;
+
+    let mut src = PcgNoiseSource::from_seed(seed);
+    let x =
+        SEARCH_REGION_X.0 + src.uniform_unit() * (SEARCH_REGION_X.1 - SEARCH_REGION_X.0);
+    let y =
+        SEARCH_REGION_Y.0 + src.uniform_unit() * (SEARCH_REGION_Y.1 - SEARCH_REGION_Y.0);
+    // Table top sits at z = 0.475 + 0.025 = 0.5; block sits half its
+    // height above that.
+    let block_z = 0.5 + BLOCK_HALF_HEIGHT;
+
+    let mut scene = Scene::with_ground(0);
+
+    scene.add_fixture(Fixture {
+        id: 0,
+        pose: Isometry3::translation(0.5, 0.0, 0.475),
+        shape: Shape::Aabb {
+            half_extents: Vector3::new(0.4, 0.4, 0.025),
+        },
+        is_support: true,
+    });
+
+    scene.add_fixture(Fixture {
+        id: BIN_FIXTURE_ID,
+        pose: Isometry3::translation(0.0, 0.6, 0.55),
+        shape: Shape::Aabb {
+            half_extents: Vector3::new(0.1, 0.1, 0.05),
+        },
+        is_support: true,
+    });
+
+    scene.insert_object(Object {
+        id: BLOCK_OBJECT_ID,
+        pose: Isometry3::translation(x, y, block_z),
+        shape: Shape::Aabb {
+            half_extents: Vector3::new(0.025, 0.025, BLOCK_HALF_HEIGHT),
+        },
+        mass: 0.1,
+        graspable: true,
+        state: ObjectState::Settled {
+            on: SupportId::Fixture(0),
+        },
+        lin_vel: Vector3::zeros(),
+    });
+
+    let spec = ArmSpec {
+        joints: vec![
+            JointSpec::Revolute {
+                axis: Vector3::z_axis(),
+                limits: (-PI, PI),
+            },
+            JointSpec::Revolute {
+                axis: Vector3::y_axis(),
+                limits: (-PI, PI),
+            },
+            JointSpec::Revolute {
+                axis: Vector3::y_axis(),
+                limits: (-PI, PI),
+            },
+        ],
+        link_offsets: vec![
+            Isometry3::translation(0.0, 0.0, 0.8),
+            Isometry3::translation(0.4, 0.0, 0.0),
+            Isometry3::translation(0.4, 0.0, 0.0),
+        ],
+        gripper: GripperSpec {
+            proximity_threshold: 0.05,
+            max_grasp_size: 0.1,
+        },
+    };
+
+    ArmWorld::new(scene, spec, /* gravity */ true)
+}
+
 /// Bundle of every port the canonical PD + gripper controller needs:
 /// per-joint encoder receivers + velocity senders, plus a single gripper
 /// command sender. Generic over `R` so future fault-wrapped tests can swap
@@ -195,5 +291,46 @@ mod tests {
         assert_eq!(block_id(&world), BLOCK_OBJECT_ID);
         assert_eq!(bin_id(&world), BIN_FIXTURE_ID);
         assert!(world.gravity_enabled);
+    }
+
+    #[test]
+    fn build_search_world_places_block_in_region() {
+        let world = build_search_world(42);
+        let block = world.scene.object(BLOCK_OBJECT_ID).expect("block placed");
+        let xy = (block.pose.translation.x, block.pose.translation.y);
+        assert!(
+            (SEARCH_REGION_X.0..=SEARCH_REGION_X.1).contains(&xy.0),
+            "block x={} outside region",
+            xy.0
+        );
+        assert!(
+            (SEARCH_REGION_Y.0..=SEARCH_REGION_Y.1).contains(&xy.1),
+            "block y={} outside region",
+            xy.1
+        );
+    }
+
+    #[test]
+    fn build_search_world_is_deterministic_per_seed() {
+        let a = build_search_world(42);
+        let b = build_search_world(42);
+        let pa = a.scene.object(BLOCK_OBJECT_ID).unwrap().pose.translation;
+        let pb = b.scene.object(BLOCK_OBJECT_ID).unwrap().pose.translation;
+        assert_eq!(pa.x, pb.x);
+        assert_eq!(pa.y, pb.y);
+    }
+
+    #[test]
+    fn build_search_world_varies_with_seed() {
+        let a = build_search_world(1);
+        let b = build_search_world(2);
+        let pa = a.scene.object(BLOCK_OBJECT_ID).unwrap().pose.translation;
+        let pb = b.scene.object(BLOCK_OBJECT_ID).unwrap().pose.translation;
+        assert!(
+            (pa.x - pb.x).abs() > 1e-6 || (pa.y - pb.y).abs() > 1e-6,
+            "seeds 1 and 2 produced identical block xy ({}, {})",
+            pa.x,
+            pa.y
+        );
     }
 }
