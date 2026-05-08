@@ -18,10 +18,17 @@ pub struct ArmRef(pub u32);
 
 /// What a `Settled` object is resting on. Distinguishes fixtures (immovable)
 /// from other objects (stacking) without conflating numeric ids across kinds.
+///
+/// `Unknown` is used by the Rapier-backed Settled-from-velocity derivation
+/// (rapier-integration design §6) — Rapier doesn't track support chains,
+/// so post-rapier `Settled` carries no support hint. Goal evaluations that
+/// previously matched `Settled { on: Fixture(bin_id) }` migrate to
+/// checking pose-vs-bin-footprint directly.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum SupportId {
     Fixture(u32),
     Object(u32),
+    Unknown,
 }
 
 /// Lifecycle state of a sim object (design v2 §5.2): `Free` (subject to

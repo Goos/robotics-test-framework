@@ -98,6 +98,10 @@ impl Scene {
     /// `SupportId::Object(id)` the object must also still be Settled (a
     /// re-Freed object stops being a support). Consumed by
     /// `gravity::reevaluate_settled` (Step 6.4).
+    ///
+    /// `SupportId::Unknown` always returns `true` — Rapier-derived
+    /// settled state doesn't track support, so there's nothing to lose
+    /// (re-classification is up to Rapier's velocity check, not this).
     pub fn has_support(&self, support: SupportId) -> bool {
         match support {
             SupportId::Fixture(id) => self.fixtures.contains_key(&id),
@@ -105,6 +109,7 @@ impl Scene {
                 .objects
                 .get(&ObjectId(id))
                 .is_some_and(|o| matches!(o.state, ObjectState::Settled { .. })),
+            SupportId::Unknown => true,
         }
     }
 

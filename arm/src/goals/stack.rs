@@ -1,13 +1,25 @@
-//! `Stack` goal — complete when object `a` is `Settled` on object `b` and has
-//! held that arrangement for at least `STACK_HOLD_DURATION_MS`. The hold
-//! requirement filters out transient settles caused by gravity-step jitter.
+//! `Stack` goal — complete when object `a` is `Settled` directly above
+//! object `b` and has held that arrangement for at least
+//! `STACK_HOLD_DURATION_MS`. The hold requirement filters out transient
+//! settles caused by physics-step jitter.
+//!
+//! Pre-Rapier (v1) checked `a.state == Settled { on: SupportId::Object(b) }`
+//! since the kinematic gravity_step tracked support chains directly.
+//! Rapier doesn't track support, so post-rapier (Phase 1) the check is
+//! pose-based: a is at-rest, a's center xy is within 1 cm of b's center xy,
+//! and a's z is just above b's top z.
 
 use rtf_core::{goal::Goal, score::Score, time::Time};
-use rtf_sim::object::{ObjectId, ObjectState, SupportId};
+use rtf_sim::object::{ObjectId, ObjectState};
 
 use crate::world::ArmWorld;
 
 const STACK_HOLD_DURATION_MS: i64 = 100;
+/// Max horizontal offset between a and b for a to count as stacked on b.
+const STACK_XY_TOL: f32 = 0.01;
+/// Max vertical gap between b's top and a's center for a to count as
+/// stacked on b. Generous to absorb solver jitter.
+const STACK_Z_TOL: f32 = 0.05;
 
 pub struct Stack {
     pub a: ObjectId,
@@ -30,10 +42,17 @@ impl Stack {
         let Some(obj_a) = world.scene.object(self.a) else {
             return false;
         };
-        matches!(
-            obj_a.state,
-            ObjectState::Settled { on: SupportId::Object(id) } if id == self.b.0,
-        )
+        let Some(obj_b) = world.scene.object(self.b) else {
+            return false;
+        };
+        if !matches!(obj_a.state, ObjectState::Settled { .. }) {
+            return false;
+        }
+        let dx = (obj_a.pose.translation.x - obj_b.pose.translation.x).abs();
+        let dy = (obj_a.pose.translation.y - obj_b.pose.translation.y).abs();
+        let b_top_z = obj_b.pose.translation.z + obj_b.shape.half_height_z();
+        let dz = (obj_a.pose.translation.z - b_top_z).abs();
+        dx <= STACK_XY_TOL && dy <= STACK_XY_TOL && dz <= STACK_Z_TOL
     }
 }
 
@@ -72,16 +91,31 @@ impl Goal<ArmWorld> for Stack {
 mod tests {
     use super::*;
     use crate::test_helpers::*;
+    use nalgebra::Translation3;
     use rtf_core::time::Time;
+    use rtf_sim::object::SupportId;
 
     #[test]
     fn complete_when_a_settled_on_b_for_at_least_100ms() {
         let mut world = build_pick_and_place_world();
         let a = world.scene.add_object_default();
         let b = world.scene.add_object_default();
-        world.scene.object_mut(a).unwrap().state = ObjectState::Settled {
-            on: SupportId::Object(b.0),
+
+        // Position b at a known pose; place a directly on top (centers
+        // aligned in xy, a's z at b's top + a's half-height ish).
+        let b_obj = world.scene.object_mut(b).unwrap();
+        b_obj.state = ObjectState::Settled {
+            on: SupportId::Unknown,
         };
+        b_obj.pose.translation = Translation3::new(0.5, 0.0, 0.5);
+        let b_top = 0.5 + b_obj.shape.half_height_z();
+
+        let a_obj = world.scene.object_mut(a).unwrap();
+        a_obj.state = ObjectState::Settled {
+            on: SupportId::Unknown,
+        };
+        a_obj.pose.translation = Translation3::new(0.5, 0.0, b_top);
+
         let mut goal = Stack::new(a, b);
         for ms in 0..100 {
             goal.tick(Time::from_millis(ms), &world);

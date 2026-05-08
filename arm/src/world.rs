@@ -360,7 +360,9 @@ impl ArmWorld {
         // Rapier physics step (rapier-integration plan, Step 1.6).
         // Per design §4: update arm-link kinematic body poses from FK,
         // step the pipeline, then sync the resolved Object poses back
-        // into the domain Scene.
+        // into the domain Scene. Step 1.7: re-derive Settled/Free state
+        // from the post-sync velocities — Rapier doesn't track support
+        // chains, so the `on:` field carries SupportId::Unknown.
         #[cfg(feature = "physics-rapier")]
         {
             for link in self.arm.link_poses() {
@@ -369,6 +371,25 @@ impl ArmWorld {
             }
             self.physics.step(dt_s);
             self.physics.sync_to_scene(&mut self.scene);
+
+            // Threshold loosened from design §6's 1e-3 to 1e-2 to absorb
+            // Rapier's residual lin-vel jitter for objects in stable
+            // contact (sub-mm jitter at default solver settings keeps the
+            // norm slightly above 1e-3 indefinitely without sleep).
+            const SETTLED_VELOCITY_THRESHOLD: f32 = 1e-2;
+            for (_, obj) in self.scene.objects_mut() {
+                if matches!(obj.state, rtf_sim::object::ObjectState::Grasped { .. }) {
+                    continue;
+                }
+                let resting = obj.lin_vel.norm() < SETTLED_VELOCITY_THRESHOLD;
+                obj.state = if resting {
+                    rtf_sim::object::ObjectState::Settled {
+                        on: rtf_sim::object::SupportId::Unknown,
+                    }
+                } else {
+                    rtf_sim::object::ObjectState::Free
+                };
+            }
         }
 
         // Grasped object is welded to the EE — refresh its pose from the
@@ -620,6 +641,116 @@ mod tests {
             world.physics().body_count(),
             simple_spec().joints.len(),
             "expected one physics body per arm link"
+        );
+    }
+
+    #[cfg(feature = "physics-rapier")]
+    #[test]
+    fn object_transitions_to_settled_when_velocity_below_threshold() {
+        // Build a world with a sphere already at rest on a flat fixture
+        // (initial pose puts it touching the fixture top). After a few
+        // steps it stays Settled.
+        use nalgebra::{Isometry3, Vector3};
+        use rtf_sim::fixture::Fixture;
+        use rtf_sim::object::{Object, ObjectId, ObjectState, SupportId};
+        use rtf_sim::shape::Shape;
+
+        let mut scene = Scene::new(0);
+        scene.add_fixture(Fixture {
+            id: 0,
+            pose: Isometry3::translation(0.0, 0.0, 0.0),
+            shape: Shape::Aabb {
+                half_extents: Vector3::new(1.0, 1.0, 0.05),
+            },
+            is_support: true,
+        });
+        scene.insert_object(Object::new(
+            ObjectId(1),
+            // Sphere centre at z = fixture_top + radius = 0.05 + 0.05 = 0.10.
+            Isometry3::translation(0.0, 0.0, 0.10),
+            Shape::Sphere { radius: 0.05 },
+            0.1,
+            true,
+        ));
+        let mut world = ArmWorld::new(scene, simple_spec(), true);
+
+        // 200 ms of stepping; sphere starts at rest and stays at rest.
+        for _ in 0..200 {
+            world.consume_actuators_and_integrate_inner(Duration::from_millis(1));
+        }
+        let obj = world.scene.object(ObjectId(1)).unwrap();
+        assert!(
+            matches!(
+                obj.state,
+                ObjectState::Settled {
+                    on: SupportId::Unknown
+                }
+            ),
+            "expected Settled with SupportId::Unknown, got {:?}",
+            obj.state
+        );
+    }
+
+    #[cfg(feature = "physics-rapier")]
+    #[test]
+    fn object_remains_free_when_moving() {
+        // Sphere in mid-air (no fixture below to settle on) — it falls
+        // and stays Free for the duration of a short step run.
+        use nalgebra::Isometry3;
+        use rtf_sim::object::{Object, ObjectId, ObjectState};
+        use rtf_sim::shape::Shape;
+
+        let mut scene = Scene::new(0);
+        scene.insert_object(Object::new(
+            ObjectId(1),
+            Isometry3::translation(0.0, 0.0, 1.0),
+            Shape::Sphere { radius: 0.05 },
+            0.1,
+            true,
+        ));
+        let mut world = ArmWorld::new(scene, simple_spec(), true);
+
+        // 50 ms of free-fall — well above settled-velocity threshold.
+        for _ in 0..50 {
+            world.consume_actuators_and_integrate_inner(Duration::from_millis(1));
+        }
+        let obj = world.scene.object(ObjectId(1)).unwrap();
+        assert!(
+            matches!(obj.state, ObjectState::Free),
+            "expected Free during fall, got {:?}",
+            obj.state
+        );
+    }
+
+    #[cfg(feature = "physics-rapier")]
+    #[test]
+    fn grasped_object_state_unchanged_by_settled_logic() {
+        use nalgebra::Isometry3;
+        use rtf_sim::object::{ArmRef, Object, ObjectId, ObjectState};
+        use rtf_sim::shape::Shape;
+
+        let mut scene = Scene::new(0);
+        scene.insert_object(Object::new(
+            ObjectId(1),
+            Isometry3::translation(0.0, 0.0, 0.5),
+            Shape::Sphere { radius: 0.05 },
+            0.1,
+            true,
+        ));
+        let mut world = ArmWorld::new(scene, simple_spec(), true);
+        // Force-set Grasped (bypass apply_gripper_command for test
+        // simplicity) — Step 1.8 will wire the proper kinematic-flip.
+        let obj = world.scene.object_mut(ObjectId(1)).unwrap();
+        obj.state = ObjectState::Grasped { by: ArmRef(0) };
+
+        for _ in 0..100 {
+            world.consume_actuators_and_integrate_inner(Duration::from_millis(1));
+        }
+        let obj = world.scene.object(ObjectId(1)).unwrap();
+        assert!(
+            matches!(obj.state, ObjectState::Grasped { .. }),
+            "Grasped state should survive the Settled-derivation pass; got {:?}",
+            obj.state
         );
     }
 

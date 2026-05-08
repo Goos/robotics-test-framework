@@ -447,46 +447,60 @@ fn build_continuous_spawn_world(seed: u64, n_spawns: u32, interval: Duration) ->
 
 // -- Goal ---------------------------------------------------------------
 
-/// Goal for the continuous-spawn scenario: count Objects whose support
-/// chain bottoms out at `Fixture(bin_id)`. Stacked blocks (Settled on
-/// another block which is itself on the bin) count too. Complete when
-/// the count reaches `target_count`. Score is `count / target_count`,
-/// clamped to [0, 1).
+/// Goal for the continuous-spawn scenario: count Settled Objects whose
+/// xy lies inside the bin's xy footprint at-or-above the bin top z.
+/// Complete when the count reaches `target_count`. Score is
+/// `count / target_count`, clamped to [0, 1).
+///
+/// Pre-Rapier (v1) walked the SupportId chain to count stacked blocks
+/// transitively. Rapier doesn't track support chains (Settled.on is
+/// SupportId::Unknown), so the check is now pose-based: stacked blocks
+/// just register as "their xy is inside the bin's xy footprint".
 struct NObjectsInBin {
     bin: u32,
     target_count: u32,
 }
 
 impl NObjectsInBin {
-    /// True iff `obj` is Settled and its support chain bottoms out at the
-    /// bin fixture. Walks the chain via SupportId::Object hops with a
-    /// hop budget to defend against (hypothetical) cycles.
-    fn supports_to_bin(&self, world: &ArmWorld, obj: &rtf_sim::object::Object) -> bool {
-        let mut state = obj.state.clone();
-        for _ in 0..16 {
-            match state {
-                ObjectState::Settled {
-                    on: SupportId::Fixture(id),
-                } => return id == self.bin,
-                ObjectState::Settled {
-                    on: SupportId::Object(parent_id),
-                } => {
-                    let Some(parent) = world.scene.object(ObjectId(parent_id)) else {
-                        return false;
-                    };
-                    state = parent.state.clone();
-                }
-                _ => return false,
-            }
+    /// Bin xy center, xy half-extents, and top z. Returns None if no
+    /// such fixture or its shape is non-Aabb.
+    fn bin_footprint(&self, world: &ArmWorld) -> Option<((f32, f32), nalgebra::Vector3<f32>, f32)> {
+        let (_, fix) = world.scene.fixtures().find(|(id, _)| **id == self.bin)?;
+        let half = match fix.shape {
+            rtf_sim::shape::Shape::Aabb { half_extents } => half_extents,
+            _ => return None,
+        };
+        let center = (fix.pose.translation.x, fix.pose.translation.y);
+        let top_z = fix.pose.translation.z + half.z;
+        Some((center, half, top_z))
+    }
+
+    /// True iff `obj` is Settled and its xy is inside the bin footprint
+    /// AND its z is at-or-above the bin top (within a 5 cm slop so a
+    /// stack-of-blocks all count).
+    fn pose_in_bin(
+        &self,
+        obj: &rtf_sim::object::Object,
+        center: (f32, f32),
+        half: nalgebra::Vector3<f32>,
+        top_z: f32,
+    ) -> bool {
+        if !matches!(obj.state, ObjectState::Settled { .. }) {
+            return false;
         }
-        false
+        let dx = (obj.pose.translation.x - center.0).abs();
+        let dy = (obj.pose.translation.y - center.1).abs();
+        dx <= half.x && dy <= half.y && obj.pose.translation.z >= top_z - 0.05
     }
 
     fn count_in_bin(&self, world: &ArmWorld) -> u32 {
+        let Some((center, half, top_z)) = self.bin_footprint(world) else {
+            return 0;
+        };
         world
             .scene
             .objects()
-            .filter(|(_, o)| self.supports_to_bin(world, o))
+            .filter(|(_, o)| self.pose_in_bin(o, center, half, top_z))
             .count() as u32
     }
 }
