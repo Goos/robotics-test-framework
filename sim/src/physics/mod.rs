@@ -9,8 +9,12 @@
 //! deps.
 
 #[cfg(feature = "physics-rapier")]
+pub mod debug_render;
+#[cfg(feature = "physics-rapier")]
 pub mod world;
 
+#[cfg(feature = "physics-rapier")]
+pub use debug_render::DebugLine;
 #[cfg(feature = "physics-rapier")]
 pub use world::PhysicsWorld;
 

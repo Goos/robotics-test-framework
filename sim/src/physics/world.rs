@@ -134,6 +134,27 @@ impl PhysicsWorld {
         self.rigid_body_set.len()
     }
 
+    /// Walk Rapier's `DebugRenderPipeline` over the current physics state
+    /// and return the captured set of colored line segments (collider
+    /// outlines, joint frames, contact normals, etc). The viz layer
+    /// converts each `DebugLine` into a `Primitive::Line`.
+    pub fn debug_render(&mut self) -> Vec<crate::physics::debug_render::DebugLine> {
+        use crate::physics::debug_render::LineCapture;
+        use rapier3d::pipeline::{DebugRenderMode, DebugRenderPipeline, DebugRenderStyle};
+        let mut backend = LineCapture::default();
+        let mut pipeline =
+            DebugRenderPipeline::new(DebugRenderStyle::default(), DebugRenderMode::all());
+        pipeline.render(
+            &mut backend,
+            &self.rigid_body_set,
+            &self.collider_set,
+            &self.impulse_joint_set,
+            &self.multibody_joint_set,
+            &self.narrow_phase,
+        );
+        backend.into_lines()
+    }
+
     /// Insert a Dynamic body for `obj` and return its handle. The body's
     /// pose is initialized from `obj.pose`; mass is inferred from the
     /// collider density-mass coupling (Rapier computes inertia from
@@ -422,6 +443,38 @@ mod tests {
     fn physics_world_starts_with_no_bodies() {
         let pw = PhysicsWorld::new(true);
         assert_eq!(pw.body_count(), 0);
+    }
+
+    #[test]
+    fn debug_render_empty_world_returns_no_lines() {
+        let mut pw = PhysicsWorld::new(true);
+        let lines = pw.debug_render();
+        assert!(
+            lines.is_empty(),
+            "empty world should produce no debug lines, got {}",
+            lines.len()
+        );
+    }
+
+    #[test]
+    fn debug_render_returns_lines_for_collider_outlines() {
+        let mut pw = PhysicsWorld::new(true);
+        // Insert one sphere; Rapier's DebugRenderPipeline draws collider
+        // outlines as a fan of line segments around the sphere — the exact
+        // count varies by tessellation, but it must be non-zero.
+        let obj = Object::new(
+            ObjectId(1),
+            Isometry3::translation(0.0, 0.0, 0.5),
+            Shape::Sphere { radius: 0.1 },
+            0.1,
+            true,
+        );
+        pw.insert_object(&obj);
+        let lines = pw.debug_render();
+        assert!(
+            !lines.is_empty(),
+            "sphere collider should produce at least one debug line"
+        );
     }
 
     fn sphere_object(id: u32, x: f32) -> Object {
