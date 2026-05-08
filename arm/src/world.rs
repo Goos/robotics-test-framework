@@ -144,6 +144,13 @@ pub struct ArmWorld {
     /// peek the front. Spawns are processed at the end of
     /// `consume_actuators_and_integrate_inner`, after sim_time advances.
     pending_spawns: VecDeque<PendingSpawn>,
+    /// When on, `snapshot()` appends a `Primitive::Line` per Rapier
+    /// debug-render line (collider outlines, joint frames, contact
+    /// normals). Default off; toggle via `enable_debug_overlay`.
+    /// Gated on `physics-rapier` since the source data only exists when
+    /// Rapier is the engine.
+    #[cfg(feature = "physics-rapier")]
+    debug_overlay: bool,
     /// Rapier-backed physics world (rapier-integration plan, Phase 1).
     /// Populated at construction with bodies for every fixture, object,
     /// and arm link in the scene. Stepped each tick once Step 1.6 wires
@@ -208,8 +215,22 @@ impl ArmWorld {
             actuators_gripper: BTreeMap::new(),
             pending_spawns: VecDeque::new(),
             #[cfg(feature = "physics-rapier")]
+            debug_overlay: false,
+            #[cfg(feature = "physics-rapier")]
             physics,
         }
+    }
+
+    /// Toggle the Rapier debug-render overlay on or off. When on, every
+    /// `snapshot()` appends one `Primitive::Line` per `DebugLine` from
+    /// `physics.debug_render()` (collider outlines, joint frames, contact
+    /// normals). Off by default to keep snapshots cheap.
+    ///
+    /// Only available with `feature = "physics-rapier"` because the
+    /// debug-render source data only exists when Rapier is the engine.
+    #[cfg(feature = "physics-rapier")]
+    pub fn enable_debug_overlay(&mut self, on: bool) {
+        self.debug_overlay = on;
     }
 
     /// Read-only accessor for the Rapier physics world. Used by tests
@@ -754,6 +775,24 @@ impl rtf_sim::runnable_world::RunnableWorld for ArmWorld {
             obj.append_primitives(&mut items);
         }
         self.arm.append_primitives(&mut items);
+        #[cfg(feature = "physics-rapier")]
+        if self.debug_overlay {
+            for (i, line) in self.physics.debug_render().into_iter().enumerate() {
+                items.push((
+                    rtf_sim::EntityId::DebugOverlay(i as u32),
+                    rtf_sim::primitive::Primitive::Line {
+                        from: line.from,
+                        to: line.to,
+                        color: rtf_sim::primitive::Color::rgba(
+                            line.color[0],
+                            line.color[1],
+                            line.color[2],
+                            line.color[3],
+                        ),
+                    },
+                ));
+            }
+        }
         rtf_sim::primitive::SceneSnapshot {
             t: self.sim_time,
             items,
@@ -819,6 +858,51 @@ mod tests {
         assert!(world.gravity_enabled);
         assert_eq!(world.arm.state.q.len(), simple_spec().joints.len());
         assert_eq!(world.time(), rtf_core::time::Time::ZERO);
+    }
+
+    #[cfg(feature = "physics-rapier")]
+    #[test]
+    fn snapshot_excludes_debug_overlay_when_disabled() {
+        use rtf_sim::primitive::Primitive;
+        let world = ArmWorld::new(Scene::new(0), simple_spec(), true);
+        let snap = rtf_sim::runnable_world::RunnableWorld::snapshot(&world);
+        let line_count = snap
+            .items
+            .iter()
+            .filter(|(_, p)| matches!(p, Primitive::Line { .. }))
+            .count();
+        assert_eq!(
+            line_count, 0,
+            "debug overlay disabled by default — no Line primitives expected"
+        );
+    }
+
+    #[cfg(feature = "physics-rapier")]
+    #[test]
+    fn snapshot_includes_debug_overlay_lines_when_enabled() {
+        use rtf_sim::primitive::Primitive;
+        // simple_spec has 2 arm links → 2 capsule colliders in physics →
+        // DebugRenderPipeline will produce a non-zero number of line
+        // segments tracing their outlines.
+        let mut world = ArmWorld::new(Scene::new(0), simple_spec(), true);
+        world.enable_debug_overlay(true);
+        let snap = rtf_sim::runnable_world::RunnableWorld::snapshot(&world);
+        let line_count = snap
+            .items
+            .iter()
+            .filter(|(_, p)| matches!(p, Primitive::Line { .. }))
+            .count();
+        assert!(
+            line_count > 0,
+            "expected at least one debug-overlay Line primitive when enabled"
+        );
+        // Each debug-overlay line should carry a DebugOverlay entity id.
+        let debug_overlay_count = snap
+            .items
+            .iter()
+            .filter(|(eid, _)| matches!(eid, rtf_sim::EntityId::DebugOverlay(_)))
+            .count();
+        assert_eq!(line_count, debug_overlay_count);
     }
 
     #[cfg(feature = "physics-rapier")]

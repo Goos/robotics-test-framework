@@ -137,8 +137,11 @@ impl PhysicsWorld {
     /// Walk Rapier's `DebugRenderPipeline` over the current physics state
     /// and return the captured set of colored line segments (collider
     /// outlines, joint frames, contact normals, etc). The viz layer
-    /// converts each `DebugLine` into a `Primitive::Line`.
-    pub fn debug_render(&mut self) -> Vec<crate::physics::debug_render::DebugLine> {
+    /// converts each `DebugLine` into a `Primitive::Line`. Takes `&self`
+    /// so it can be called from the (`&self`) `snapshot()` path — the
+    /// pipeline state lives entirely in the local `pipeline`/`backend`
+    /// variables and never mutates the physics world.
+    pub fn debug_render(&self) -> Vec<crate::physics::debug_render::DebugLine> {
         use crate::physics::debug_render::LineCapture;
         use rapier3d::pipeline::{DebugRenderMode, DebugRenderPipeline, DebugRenderStyle};
         let mut backend = LineCapture::default();
@@ -447,7 +450,7 @@ mod tests {
 
     #[test]
     fn debug_render_empty_world_returns_no_lines() {
-        let mut pw = PhysicsWorld::new(true);
+        let pw = PhysicsWorld::new(true);
         let lines = pw.debug_render();
         assert!(
             lines.is_empty(),

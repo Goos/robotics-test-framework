@@ -18,6 +18,12 @@ pub enum EntityId {
         arm_id: u32,
         slot: u32,
     },
+    /// Per-line id for the optional Rapier debug-render overlay
+    /// (Phase 2). The numeric tag is the line's index in the
+    /// per-tick `physics.debug_render()` list — stable within a
+    /// snapshot, not stable across ticks. Sorts last so the overlay
+    /// stays out of the way of the persistent entity ids.
+    DebugOverlay(u32),
 }
 
 #[cfg(test)]
