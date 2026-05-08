@@ -1389,7 +1389,7 @@ mod tests {
         // Block sits below at z=0; we'll place it at the EE finger zone.
         scene.insert_object(Object {
             id: block_id,
-            pose: Isometry3::translation(0.0, 0.0, 0.24),
+            pose: Isometry3::translation(0.04, 0.0, 0.2),
             shape: Shape::Aabb {
                 half_extents: Vector3::new(0.008, 0.008, 0.008),
             },
@@ -1440,7 +1440,7 @@ mod tests {
         let block_id = ObjectId(1);
         scene.insert_object(Object {
             id: block_id,
-            pose: Isometry3::translation(0.0, 0.0, 0.24),
+            pose: Isometry3::translation(0.04, 0.0, 0.2),
             shape: Shape::Aabb {
                 half_extents: Vector3::new(0.008, 0.008, 0.008),
             },
@@ -1501,7 +1501,7 @@ mod tests {
         let block_id = ObjectId(1);
         scene.insert_object(Object {
             id: block_id,
-            pose: Isometry3::translation(1.0, 0.0, 0.04),
+            pose: Isometry3::translation(1.04, 0.0, 0.0),
             shape: Shape::Aabb {
                 half_extents: Vector3::new(0.008, 0.008, 0.008),
             },
@@ -1569,7 +1569,7 @@ mod tests {
         // pinch with normal force from the finger interpenetration.
         scene.insert_object(Object {
             id: block_id,
-            pose: Isometry3::translation(0.0, 0.0, 0.24),
+            pose: Isometry3::translation(0.04, 0.0, 0.2),
             shape: Shape::Aabb {
                 half_extents: Vector3::new(0.008, 0.008, 0.008),
             },
@@ -1710,7 +1710,7 @@ mod tests {
         let mut scene = Scene::new(0);
         scene.insert_object(Object {
             id: ObjectId(1),
-            pose: Isometry3::translation(0.0, 0.0, 0.24),
+            pose: Isometry3::translation(0.04, 0.0, 0.2),
             shape: Shape::Aabb {
                 half_extents: Vector3::new(0.008, 0.008, 0.008),
             },
@@ -1940,7 +1940,7 @@ mod tests {
         let mut scene = Scene::new(0);
         scene.insert_object(Object::new(
             block_id,
-            Isometry3::translation(0.0, 0.0, 0.24),
+            Isometry3::translation(0.04, 0.0, 0.2),
             Shape::Sphere { radius: 0.015 },
             0.1,
             /* graspable */ true,
@@ -2001,7 +2001,7 @@ mod tests {
         let mut scene = Scene::new(0);
         scene.insert_object(Object::new(
             block_id,
-            Isometry3::translation(1.0, 0.0, 0.04),
+            Isometry3::translation(1.04, 0.0, 0.0),
             Shape::Sphere { radius: 0.015 },
             0.1,
             true,

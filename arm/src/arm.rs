@@ -62,14 +62,20 @@ impl Arm {
 }
 
 pub const LINK_RADIUS: f32 = 0.02;
-/// Half-extents of each finger pillar (small thin box, 4 cm long along EE +z).
-pub const FINGER_HALF_EXTENTS: Vector3<f32> = Vector3::new(0.01, 0.01, 0.04);
+/// Half-extents of each finger pillar (small thin box, 4 cm long along
+/// EE +x). Phase 3.4.5d: long axis switched from EE +z to EE +x so it
+/// aligns with the wrist link direction; under the wrist alignment
+/// (cumulative pitch = π/2 → EE +x = world -z), fingers protrude
+/// DOWNWARD in world frame.
+pub const FINGER_HALF_EXTENTS: Vector3<f32> = Vector3::new(0.04, 0.01, 0.01);
 /// Lateral separation of finger centers along EE +y when the gripper is open.
 pub const FINGER_OPEN_SEPARATION: f32 = 0.04;
 /// Lateral separation of finger centers along EE +y when the gripper is closed.
 pub const FINGER_CLOSED_SEPARATION: f32 = 0.012;
-/// Forward offset of the fingers along EE +z so they protrude past the EE
-/// origin (matches `FINGER_HALF_EXTENTS.z` so fingers extend from EE surface).
+/// Forward offset of the fingers along EE +x so they protrude past the EE
+/// origin (matches `FINGER_HALF_EXTENTS.x` so fingers extend from EE
+/// surface). Phase 3.4.5d: switched from EE +z to EE +x to align with
+/// the wrist link direction (see `FINGER_HALF_EXTENTS`).
 pub const FINGER_FORWARD_OFFSET: f32 = 0.04;
 /// Slot ids assigned to the two finger primitives within `EntityId::Arm`.
 /// 998/999 are kept high so they don't collide with link slots (which are
@@ -81,6 +87,11 @@ pub const FINGER_SLOT_MINUS: u32 = 999;
 /// slot (+y or -y side), and current lateral separation. Shared by the
 /// visualization (`append_primitives`) and the per-tick physics-pose
 /// update so both layers see exactly the same finger geometry.
+///
+/// Phase 3.4.5d: fingers protrude in EE +x (matching the wrist link
+/// direction), so under the wrist alignment (EE +x = world -z) they
+/// point straight down. EE +y still maps to world +y for finger
+/// separation.
 pub fn finger_pose(ee_pose: Isometry3<f32>, slot: u32, separation: f32) -> Isometry3<f32> {
     let sign = if slot == FINGER_SLOT_PLUS {
         1.0_f32
@@ -89,7 +100,7 @@ pub fn finger_pose(ee_pose: Isometry3<f32>, slot: u32, separation: f32) -> Isome
     };
     ee_pose
         * Isometry3::from_parts(
-            Translation3::new(0.0, sign * separation, FINGER_FORWARD_OFFSET),
+            Translation3::new(FINGER_FORWARD_OFFSET, sign * separation, 0.0),
             UnitQuaternion::identity(),
         )
 }
@@ -130,7 +141,7 @@ impl Visualizable for Arm {
         // Articulated gripper: two finger pillars whose lateral separation
         // is the live `gripper_separation` (0.012 closed → 0.04 open after
         // Phase 3.2). Both fingers protrude forward of the EE origin along
-        // its local +z.
+        // its local +x (Phase 3.4.5d — aligns with the wrist link).
         let separation = self.state.gripper_separation;
         for slot in [FINGER_SLOT_PLUS, FINGER_SLOT_MINUS] {
             out.push((
