@@ -600,7 +600,38 @@ Commit `[arm] Step 3.4.5c: Controllers drive J3 via 3R IK (intermediate)`.
 
 ---
 
-### Step 3.5 — `[arm] Re-tune existing example controllers for friction grasp`
+### Step 3.5 — `[arm,sim] Joint-attached grasp (FixedJoint) + slip-impulse detection + controller re-tuning`
+
+**Pivot from original plan.** Original framing: "tune friction parameters." After 12 iterations the friction-grasp approach hit a Rapier kinematic↔dynamic friction-coupling limitation; best e2e score was 0.788 vs 0.9 acceptance bar. See updated design doc §11.3 for full rationale.
+
+**New approach:** on grasp transition, insert a Rapier `FixedJoint` between the EE kinematic body and the object's dynamic body, anchored at the current relative offset. Object stays Dynamic. Per tick, query the joint's accumulated impulse magnitude; if > slip threshold, remove the joint and transition `Grasped → Free`. On gripper open, remove the joint explicitly.
+
+This is industry-standard practice (Isaac Sim, NVIDIA PhysX use this pattern). Honest framing: it's a soft-weld with slip-as-impulse-threshold, not pure-friction grip. See design doc §11.3 for the full disclosure.
+
+**Files**: `sim/src/physics/world.rs` (add joint management + slip query), `arm/src/world.rs` (call into joint API on grasp/release transitions; per-tick slip check), `arm/examples/*.rs` (4 controllers — re-tune timing, optionally react to slip events).
+
+**Concrete sub-tasks (all in one commit):**
+
+1. `PhysicsWorld::insert_grasp_joint(arm_id, ee_body_handle, object_id) -> ImpulseJointHandle` — creates a `FixedJoint` between the EE arm-link kinematic body and the object's dynamic body, anchored at the current relative pose. Stores the handle keyed on `object_id` in a new `BTreeMap<ObjectId, ImpulseJointHandle>`.
+2. `PhysicsWorld::remove_grasp_joint(object_id)` — removes from `ImpulseJointSet` + the lookup map.
+3. `PhysicsWorld::grasp_joint_impulse(object_id) -> f32` — sums the joint's `impulses` (linear + angular magnitudes) over the most recent step.
+4. In `arm/src/world.rs`: on grasp transition, call `physics.insert_grasp_joint(...)`. On release transition (gripper open), call `physics.remove_grasp_joint(...)`. Per tick after `physics.step`, for any currently-grasped object: check `grasp_joint_impulse > SLIP_THRESHOLD` (default 5.0 N·s, tunable); if exceeded, remove joint + set state to `Free`.
+5. Discard prior friction-tuning state in `apply_gripper_command` and per-tick `derive_friction_grasp_state` (those were the failed-approach scaffolding). Keep finger-contact detection logic only as the *trigger* for grasp transition — the actual coupling is now the joint, not the contact.
+6. Re-tune controller examples for the joint-grasp model:
+   - `close_hold_ticks`: drop back to 200 (joint forms instantly; long hold no longer helpful)
+   - Ascend velocity clamp can be removed (joint provides rigid attachment; no slip risk during slow translation)
+   - "Still grasped" verification reads `arm.state.grasped.is_some()` after AscendWithBlock; if it became None (slip during ascend or yaw), abort and restart sweep (matches existing slip-handling in continuous_spawn).
+7. Verify all four example seed-test suites pass within their acceptance bars + deadlines.
+
+Tests:
+- `joint_grasp_inserts_fixed_joint_on_grasp_transition` — close gripper near object, assert `physics.grasp_joint_impulse(id).is_some()`.
+- `joint_grasp_removes_joint_on_release` — open gripper, assert no joint.
+- `joint_grasp_releases_under_high_impulse` — set up a held object, apply forces that exceed slip threshold, assert state transitions to Free + joint removed.
+- e2e: pick_place, find_grasp_place (3 seeds), continuous_spawn (3 seeds), find_by_touch (3 seeds) all pass.
+
+Commit message: `[arm,sim] Step 3.5: Joint-attached grasp (FixedJoint) with slip-impulse detection; controller re-tune`. Include in commit body: brief disclosure that this pivots from pure-friction (12 tuning iterations failed) to joint-based per design §11.3.
+
+### Step 3.5-original — (REMOVED) `[arm] Re-tune existing example controllers for friction grasp`
 
 **Files**: `arm/examples/pick_place.rs`, `arm/examples/find_grasp_place.rs`, `arm/examples/continuous_spawn.rs`, `arm/examples/find_by_touch.rs`.
 

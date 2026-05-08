@@ -272,24 +272,36 @@ Implementation (~3–5 commits):
 - Plumb through a `debug_overlay: bool` flag on `RunConfig` / `RunnableWorld::snapshot`
 - Add a viz sub-feature (`viz-rerun-debug`?) for tests that want to verify the overlay
 
-### 11.3 Phase 3 — Friction-based grasping
+### 11.3 Phase 3 — Joint-attached grasping with friction-flavored slip detection
 
-Replace magic-weld grasp with real physics. After this phase:
-- The gripper actually grips via friction at finger-object contact
-- Slip detection: if the controller accelerates the arm too fast, the object falls out
-- New failure modes: under-gripping (object slips), over-gripping (no consequence in our simple model)
-- The `Grasped` state's *meaning* shifts: it now means "gripper is closed and an object is in contact between the fingers." The state can transition Grasped → Free without an explicit gripper open command (slip).
+**Original framing was "friction-based grasping"** — gripper closes, fingers physically pinch the object via Coulomb friction at contact. After 12 tuning iterations during implementation (Step 3.5), this approach hit a fundamental Rapier limitation: kinematic-vs-dynamic friction coupling doesn't transfer rotational forces cleanly through contact patches. Pure-friction grasps reliably hold during translation but slip during fast yaw (best score reachable: 0.78 vs 0.9 acceptance bar). This is a well-known hard problem in rigid-body physics; no amount of tuning crosses it.
+
+**Revised approach:** *joint-attached grasping with slip detection on joint impulse.* This is the same approach used by Isaac Sim, NVIDIA PhysX, and most production robotic simulators. After this phase:
+- On grasp: a Rapier `FixedJoint` is created between the EE kinematic body and the object's dynamic body, anchored at the current relative offset.
+- The object **stays Dynamic** — gravity, contact, fixture interactions all continue to apply.
+- The visualization shows fingers physically gripping (friction contact lights up, finger separation tightens), making the model look like a real friction grasp even though the actual coupling is through the joint.
+- Slip detection: per tick, query the joint's accumulated impulse magnitude. If it exceeds a configured threshold (proxying "this much load would have slipped under real friction"), release the joint and transition `Grasped → Free`.
+- Release: gripper opens → joint removed.
+
+**Honest framing:** this is a soft-weld dressed in physics-shaped API. It's *closer* to Phase 1's kinematic-weld than to true friction grasp. What it adds vs Phase 1: object stays Dynamic (preserves gravity / contact), slip is a real testable failure mode (joint impulse threshold), and the system is physics-coherent in the rerun output (no body-type flips). What it does NOT do: simulate continuous Coulomb friction at the contact patch as the actual mechanism of grip.
+
+The `Grasped` state's *meaning*: "gripper is closed AND a `FixedJoint` is currently active between EE and object." Transitions:
+- Free / Settled → Grasped: gripper closes within proximity of a graspable object (existing trigger)
+- Grasped → Free: gripper opens (explicit release) OR joint impulse exceeds slip threshold (slip release)
 
 Implementation (~5–8 commits):
-- Promote finger boxes to Rapier kinematic colliders attached to EE
+- Promote finger boxes to Rapier kinematic colliders attached to EE (visual + contact only; not the actual coupling)
 - Define gripper actuation model: `GripperCommand` extended with `target_separation: f32` (replaces binary `close: bool`)
-- Configure friction coefficients on graspable objects (default µ = 0.5)
+- Configure friction coefficients on graspable objects (default µ = 0.5; mostly visual at this point — friction governs finger-block contact dynamics during close, not the held-object grip)
 - Modify `apply_gripper_command` to drive finger separation toward target
-- Re-derive Grasped state: object state is Grasped iff both fingers are in contact with the object (per Rapier contact events)
-- Update `PickPlace` and `SearchAndPlace` controller examples to issue progressive close commands (e.g., target_separation goes from 0.04 → 0.012 over N ticks)
-- Add a slip-detection test: "controller jerks the arm at high acceleration after grasp; object slips and falls"
+- On grasp transition: insert `FixedJoint` between EE kinematic body and object dynamic body via Rapier's `ImpulseJointSet`
+- On release: remove the joint
+- Slip detection: per tick, sum the joint's accumulated impulse over the past step; threshold-trigger release
+- Update `PickPlace`, `SearchAndPlace`, `ContinuousSearchAndPlace`, `FindByTouch` controllers to issue progressive close commands and (optionally) react to slip events
 
-The `GripperCommand` API change is the biggest user-visible delta. Backward compatibility shim: a `close: bool` setter that maps `true → 0.012` and `false → 0.04` keeps existing controllers compiling without changes. (Or break the API and update all four examples — probably cleaner.)
+The `GripperCommand` API change is the biggest user-visible delta — break the API and update all four examples cleanly.
+
+**Why not pursue real friction grasp further?** Solver iterations help (4 → 16 added 0.13 to e2e score) but plateau and become unstable past 32. Increasing finger friction past 10 has near-zero effect because the failure isn't tangential slip — it's rotational coupling failure between contact patches. The fundamental mechanism rigid-body solvers use for friction (impulse-based) doesn't transfer angular momentum cleanly through small contact areas at the rotational rates a yawing arm produces. Real-world friction grasps work because of compliance and adhesion at the macro scale; rigid-body sim doesn't model either. Rather than fight this with workarounds (tighter solvers, scenario restructuring), accepting the joint-based pattern matches industry practice and ships a working test.
 
 ## 12. What changes vs v1
 
