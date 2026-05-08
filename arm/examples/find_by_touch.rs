@@ -349,7 +349,9 @@ where
                 }
             }
             FbtState::CloseGripper(n) => {
-                self.gripper_tx.send(GripperCommand { close: true });
+                self.gripper_tx.send(GripperCommand {
+                    target_separation: 0.012,
+                });
                 self.halt_joints();
                 self.state = if n >= CLOSE_HOLD_TICKS {
                     FbtState::AscendWithBlock
@@ -360,7 +362,9 @@ where
             FbtState::AscendWithBlock => {
                 let cxy = self.contact_xy.expect("contact_xy persists after grasp");
                 let target = self.ik_target_for(cxy, PARK_Z);
-                self.gripper_tx.send(GripperCommand { close: true });
+                self.gripper_tx.send(GripperCommand {
+                    target_separation: 0.012,
+                });
                 self.drive_joints_toward(target);
                 if self.joints_converged_to(target) {
                     self.state = FbtState::YawToBin;
@@ -368,14 +372,18 @@ where
             }
             FbtState::YawToBin => {
                 let target = self.ik_target_for(self.target_bin_xy, PARK_Z);
-                self.gripper_tx.send(GripperCommand { close: true });
+                self.gripper_tx.send(GripperCommand {
+                    target_separation: 0.012,
+                });
                 self.drive_joints_toward(target);
                 if self.joints_converged_to(target) {
                     self.state = FbtState::OpenGripper(0);
                 }
             }
             FbtState::OpenGripper(n) => {
-                self.gripper_tx.send(GripperCommand { close: false });
+                self.gripper_tx.send(GripperCommand {
+                    target_separation: 0.04,
+                });
                 self.halt_joints();
                 self.state = if n >= OPEN_HOLD_TICKS {
                     FbtState::Done

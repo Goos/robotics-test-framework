@@ -286,7 +286,9 @@ where
                 }
             }
             CSState::CloseGripper(n) => {
-                self.gripper_tx.send(GripperCommand { close: true });
+                self.gripper_tx.send(GripperCommand {
+                    target_separation: 0.012,
+                });
                 self.halt_joints();
                 if n >= CLOSE_HOLD_TICKS {
                     // Verify a block was actually grasped before
@@ -297,7 +299,9 @@ where
                     // matches MIN_COMMIT_PEAK so any meaningful held
                     // contact qualifies.
                     if pressure < 0.5 {
-                        self.gripper_tx.send(GripperCommand { close: false });
+                        self.gripper_tx.send(GripperCommand {
+                            target_separation: 0.04,
+                        });
                         self.reset_sweep();
                         self.state = CSState::Sweeping;
                     } else {
@@ -310,7 +314,9 @@ where
             CSState::AscendWithBlock => {
                 let cxy = self.contact_xy.expect("contact_xy persists after grasp");
                 let target = self.ik_target_for(cxy, PARK_Z);
-                self.gripper_tx.send(GripperCommand { close: true });
+                self.gripper_tx.send(GripperCommand {
+                    target_separation: 0.012,
+                });
                 self.drive_joints_toward(target);
                 if self.joints_converged_to(target) {
                     self.state = CSState::YawToBin;
@@ -318,14 +324,18 @@ where
             }
             CSState::YawToBin => {
                 let target = self.ik_target_for(self.target_bin_xy, PARK_Z);
-                self.gripper_tx.send(GripperCommand { close: true });
+                self.gripper_tx.send(GripperCommand {
+                    target_separation: 0.012,
+                });
                 self.drive_joints_toward(target);
                 if self.joints_converged_to(target) {
                     self.state = CSState::OpenGripper(0);
                 }
             }
             CSState::OpenGripper(n) => {
-                self.gripper_tx.send(GripperCommand { close: false });
+                self.gripper_tx.send(GripperCommand {
+                    target_separation: 0.04,
+                });
                 self.halt_joints();
                 if n >= OPEN_HOLD_TICKS {
                     self.placed_count += 1;

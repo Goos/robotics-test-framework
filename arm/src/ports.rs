@@ -53,10 +53,14 @@ pub struct JointVelocityCommand {
     pub q_dot_target: f32,
 }
 
-/// Gripper actuator input (design v2 §5.6): `close = true` requests grasp.
+/// Gripper actuator input (rapier-integration Phase 3.2 — replaces the
+/// v1 `close: bool`): the requested lateral finger separation in metres.
+/// The world drives `arm.state.gripper_separation` toward this value at
+/// a fixed rate (0.5 m/s). Conventional "open" target is 0.04 m,
+/// "close" is 0.012 m.
 #[derive(Copy, Clone, Debug)]
 pub struct GripperCommand {
-    pub close: bool,
+    pub target_separation: f32,
 }
 
 /// EE-mounted scalar pressure sensor reading (find-grasp-place design §2).

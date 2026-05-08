@@ -222,7 +222,9 @@ where
                 }
             }
             PickPlaceState::CloseGripper(n) => {
-                self.gripper_tx.send(GripperCommand { close: true });
+                self.gripper_tx.send(GripperCommand {
+                    target_separation: 0.012,
+                });
                 self.halt_joints();
                 self.state = if n >= self.close_hold_ticks {
                     PickPlaceState::AscendWithBlock
@@ -231,14 +233,18 @@ where
                 };
             }
             PickPlaceState::AscendWithBlock => {
-                self.gripper_tx.send(GripperCommand { close: true });
+                self.gripper_tx.send(GripperCommand {
+                    target_separation: 0.012,
+                });
                 self.drive_joints(yaw_err_block, self.ik_above_block.0, self.ik_above_block.1);
                 if self.pitch_converged(self.ik_above_block.0, self.ik_above_block.1) {
                     self.state = PickPlaceState::YawToBin;
                 }
             }
             PickPlaceState::YawToBin => {
-                self.gripper_tx.send(GripperCommand { close: true });
+                self.gripper_tx.send(GripperCommand {
+                    target_separation: 0.012,
+                });
                 self.drive_joints(yaw_err_bin, self.ik_above_bin.0, self.ik_above_bin.1);
                 if yaw_err_bin.abs() < self.joint_tol
                     && self.pitch_converged(self.ik_above_bin.0, self.ik_above_bin.1)
@@ -247,7 +253,9 @@ where
                 }
             }
             PickPlaceState::OpenGripper(n) => {
-                self.gripper_tx.send(GripperCommand { close: false });
+                self.gripper_tx.send(GripperCommand {
+                    target_separation: 0.04,
+                });
                 self.halt_joints();
                 self.state = if n >= self.open_hold_ticks {
                     PickPlaceState::Done

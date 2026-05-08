@@ -477,6 +477,9 @@ impl ArmWorld {
         if let Some(cmd) = gripper_cmd {
             self.apply_gripper_command(cmd);
         }
+        // Phase 3.2: even with no command this tick, slew separation
+        // toward the latched target and re-evaluate grasp transitions.
+        self.update_gripper_separation_and_transitions(dt);
 
         // Rapier physics step (rapier-integration plan, Step 1.6).
         // Per design §4: update arm-link kinematic body poses from FK,
@@ -566,21 +569,58 @@ impl ArmWorld {
         }
     }
 
-    /// Apply a single gripper command — flip `gripper_closed`, then handle the
-    /// open→release and closed→try-grasp transitions per design v2 §5.4.
+    /// Phase 3.2: rate at which `gripper_separation` slews toward
+    /// `gripper_target` (m/s). Set very high (50 m/s) for Step 3.2 so
+    /// the gripper effectively snaps in one tick — preserves Phase 1's
+    /// instantaneous-grasp timing through this commit. Step 3.4/3.5
+    /// drops this to a realistic 0.5 m/s once friction-grasp replaces
+    /// the kinematic weld; see plan for context.
+    const GRIPPER_SLEW_RATE_M_PER_S: f32 = 50.0;
+    /// Below this separation (m) the gripper is considered closed and
+    /// will attempt to grasp the nearest graspable object.
+    const GRIPPER_CLOSED_THRESHOLD_M: f32 = 0.02;
+    /// Above this separation (m) the gripper is considered open and
+    /// will release any held object.
+    const GRIPPER_OPEN_THRESHOLD_M: f32 = 0.035;
+
+    /// Phase 3.2: latch the most recent gripper command into
+    /// `gripper_target`. The actual finger motion + grasp/release
+    /// transitions happen in `update_gripper_separation_and_transitions`
+    /// each tick, after the slew toward target.
     fn apply_gripper_command(&mut self, cmd: GripperCommand) {
-        let was_closed = self.arm.state.gripper_closed;
-        let now_closed = cmd.close;
-        self.arm.state.gripper_closed = now_closed;
-        // Phase 3.1: keep gripper_separation in lockstep with the boolean
-        // by snapping it on the close/open transition. Step 3.2 swaps the
-        // API for continuous target_separation and replaces this snap with
-        // a per-tick approach toward the target.
-        self.arm.state.gripper_separation = if now_closed {
-            crate::arm::FINGER_CLOSED_SEPARATION
+        self.arm.state.gripper_target = cmd.target_separation;
+    }
+
+    /// Phase 3.2: per-tick gripper update. (1) slews
+    /// `gripper_separation` toward `gripper_target` at
+    /// `GRIPPER_SLEW_RATE_M_PER_S`, (2) re-derives `gripper_closed` from
+    /// the new separation, (3) fires the grasp transition on
+    /// open→closed and the release transition on closed→open. Replaces
+    /// the v1 boolean-edge logic in `apply_gripper_command`.
+    fn update_gripper_separation_and_transitions(&mut self, dt: Duration) {
+        let dt_s = dt.as_nanos() as f32 / 1.0e9_f32;
+        let max_step = Self::GRIPPER_SLEW_RATE_M_PER_S * dt_s;
+        let cur = self.arm.state.gripper_separation;
+        let target = self.arm.state.gripper_target;
+        let next = if (target - cur).abs() <= max_step {
+            target
+        } else if target > cur {
+            cur + max_step
         } else {
-            crate::arm::FINGER_OPEN_SEPARATION
+            cur - max_step
         };
+        self.arm.state.gripper_separation = next;
+
+        let was_closed = self.arm.state.gripper_closed;
+        let now_closed = if was_closed {
+            // Hysteresis: stay closed until separation crosses the open
+            // threshold (the upper edge), so a tiny separation wobble
+            // doesn't repeatedly fire grasp/release.
+            next < Self::GRIPPER_OPEN_THRESHOLD_M
+        } else {
+            next < Self::GRIPPER_CLOSED_THRESHOLD_M
+        };
+        self.arm.state.gripper_closed = now_closed;
 
         // Opening transition: release any held object back to Free.
         if was_closed && !now_closed {
@@ -588,19 +628,18 @@ impl ArmWorld {
                 if let Some(obj) = self.scene.object_mut(grasped_id) {
                     obj.state = rtf_sim::object::ObjectState::Free;
                 }
-                // Rapier: switch back to Dynamic so gravity + contact
-                // resume governing the released object.
                 #[cfg(feature = "physics-rapier")]
                 self.physics.set_object_dynamic(grasped_id);
             }
         }
 
-        // Closing transition (and nothing currently held): try to grasp the
-        // first graspable, not-already-Grasped object within
-        // proximity_threshold of the EE. Per design v2 §5.4, only `Grasped`
-        // is excluded — `Free` and `Settled` are both eligible (Phase 7's
-        // PickObject starts with the block Settled on a table fixture).
-        // Iteration is by ObjectId (BTreeMap) so the choice is deterministic.
+        // Closing transition (and nothing currently held): try to grasp
+        // the first graspable, not-already-Grasped object within
+        // proximity_threshold of the EE. Per design v2 §5.4, only
+        // `Grasped` is excluded — `Free` and `Settled` are both
+        // eligible (Phase 7's PickObject starts Settled on a table).
+        // Iteration is by ObjectId (BTreeMap) so the choice is
+        // deterministic.
         if !was_closed && now_closed && self.arm.state.grasped.is_none() {
             let ee = self.ee_pose();
             let threshold = self.arm.spec.gripper.proximity_threshold;
@@ -622,9 +661,6 @@ impl ArmWorld {
                         by: rtf_sim::object::ArmRef(arm_id),
                     };
                 }
-                // Rapier: flip the body to KinematicPositionBased so it
-                // stops being affected by gravity / contact and gets
-                // dragged along with the EE each tick.
                 #[cfg(feature = "physics-rapier")]
                 self.physics.set_object_kinematic(id, ee);
             }
@@ -903,6 +939,48 @@ mod tests {
         assert_eq!(world.time(), rtf_core::time::Time::ZERO);
     }
 
+    #[test]
+    fn gripper_separation_converges_to_target() {
+        // Phase 3.2: GripperCommand{ target_separation } drives the
+        // separation toward the target each tick. Open → close should
+        // converge within `(0.04 - 0.012) / SLEW_RATE` seconds; with
+        // the Step 3.2 placeholder slew rate (50 m/s) it converges in
+        // one tick.
+        let mut world = ArmWorld::new(Scene::new(0), simple_spec(), false);
+        let g_tx = world.attach_gripper_actuator();
+        let initial = world.arm.state.gripper_separation;
+        g_tx.send(GripperCommand {
+            target_separation: 0.012,
+        });
+        world.consume_actuators_and_integrate_inner(Duration::from_millis(1));
+        let after = world.arm.state.gripper_separation;
+        assert!(
+            after < initial,
+            "separation should decrease toward target: initial={initial}, after={after}"
+        );
+        assert!(
+            (after - 0.012).abs() < 1e-3,
+            "separation should reach target within 1 tick at the placeholder slew rate; got {after}"
+        );
+    }
+
+    #[test]
+    fn existing_grasp_threshold_semantics_preserved() {
+        // Phase 3.2: closing the gripper (separation drops below the
+        // 0.02 m closed-threshold) flips `gripper_closed` from false to
+        // true, exactly like the v1 boolean API used to.
+        let mut world = ArmWorld::new(Scene::new(0), simple_spec(), false);
+        let g_tx = world.attach_gripper_actuator();
+        assert!(!world.arm.state.gripper_closed);
+        g_tx.send(GripperCommand {
+            target_separation: 0.012,
+        });
+        // One tick suffices at the placeholder slew rate; future slow
+        // slew will need a few more.
+        world.consume_actuators_and_integrate_inner(Duration::from_millis(1));
+        assert!(world.arm.state.gripper_closed);
+    }
+
     #[cfg(feature = "physics-rapier")]
     #[test]
     fn fingers_have_kinematic_bodies() {
@@ -945,7 +1023,9 @@ mod tests {
 
         // Then close the gripper, drive a tick, assert the +y finger has
         // moved inward (smaller |y|).
-        g_tx.send(GripperCommand { close: true });
+        g_tx.send(GripperCommand {
+            target_separation: 0.012,
+        });
         world.consume_actuators_and_integrate_inner(Duration::from_millis(1));
         let pos_closed = world.physics().body_position(h_plus).unwrap();
         let y_closed = pos_closed.translation.y.abs();
@@ -1229,33 +1309,38 @@ mod tests {
     #[cfg(feature = "physics-rapier")]
     #[test]
     fn grasp_switches_body_to_kinematic() {
-        // build_pick_and_place_world has the block at xy=(0.6, 0, 0.525)
-        // and the EE starts at (0, 0, 0.8). Move EE to the block, then
-        // close the gripper → block should be flipped to Kinematic.
-        use crate::test_helpers::{build_pick_and_place_world, BLOCK_OBJECT_ID};
+        // Reuse the simple gravity-off test rig (`moving_ee_spec`) so
+        // the block stays where we put it during the gripper slew.
+        // build_pick_and_place_world's gravity-on world is too lively
+        // for a per-tick close test (block falls during the 60 ms slew).
+        use nalgebra::Isometry3;
+        use rtf_sim::object::{Object, ObjectId};
         use rtf_sim::physics::world::RigidBodyType;
+        use rtf_sim::shape::Shape;
 
-        let mut world = build_pick_and_place_world();
-        // Cheat: directly set joint state so the EE ends up close to the
-        // block. Easier than running PD for this unit test.
-        // π/4 + π/2: shoulder pitched halfway down, elbow at 90°. Brings
-        // EE roughly above the table; the block is then teleported to
-        // the EE in the next two lines.
-        world.arm.state.q = vec![
-            0.0,
-            core::f32::consts::FRAC_PI_4,
-            core::f32::consts::FRAC_PI_2,
-        ];
-        // For the test, we manually move the block to where the EE is.
-        let ee = world.ee_pose();
-        if let Some(obj) = world.scene.object_mut(BLOCK_OBJECT_ID) {
-            obj.pose = ee;
-        }
+        // moving_ee_spec has 2 joints with link offsets of 0.5 m in +x,
+        // so EE at q=(0,0) sits at (1.0, 0, 0). Place sphere there.
+        let mut scene = Scene::new(0);
+        scene.insert_object(Object::new(
+            ObjectId(1),
+            Isometry3::translation(1.0, 0.0, 0.0),
+            Shape::Sphere { radius: 0.005 },
+            0.1,
+            true,
+        ));
+        let mut world = ArmWorld::new(scene, moving_ee_spec(), /* gravity */ false);
+
         let g_tx = world.attach_gripper_actuator();
-        g_tx.send(GripperCommand { close: true });
-        world.consume_actuators_and_integrate_inner(Duration::from_millis(1));
+        g_tx.send(GripperCommand {
+            target_separation: 0.012,
+        });
+        // Phase 3.2: slew 60 ms so separation crosses the 0.02 m
+        // closed-threshold and the grasp transition fires.
+        for _ in 0..60 {
+            world.consume_actuators_and_integrate_inner(Duration::from_millis(1));
+        }
 
-        let h = world.physics().object_handle(BLOCK_OBJECT_ID).unwrap();
+        let h = world.physics().object_handle(ObjectId(1)).unwrap();
         assert_eq!(
             world.physics().body_type(h),
             Some(RigidBodyType::KinematicPositionBased),
@@ -1280,11 +1365,19 @@ mod tests {
             obj.pose = ee;
         }
         let g_tx = world.attach_gripper_actuator();
-        g_tx.send(GripperCommand { close: true });
-        world.consume_actuators_and_integrate_inner(Duration::from_millis(1));
-        // Now release.
-        g_tx.send(GripperCommand { close: false });
-        world.consume_actuators_and_integrate_inner(Duration::from_millis(1));
+        g_tx.send(GripperCommand {
+            target_separation: 0.012,
+        });
+        // Phase 3.2: drive close + release each through their slew.
+        for _ in 0..60 {
+            world.consume_actuators_and_integrate_inner(Duration::from_millis(1));
+        }
+        g_tx.send(GripperCommand {
+            target_separation: 0.04,
+        });
+        for _ in 0..60 {
+            world.consume_actuators_and_integrate_inner(Duration::from_millis(1));
+        }
 
         let h = world.physics().object_handle(BLOCK_OBJECT_ID).unwrap();
         assert_eq!(
@@ -1310,8 +1403,13 @@ mod tests {
             obj.pose = ee;
         }
         let g_tx = world.attach_gripper_actuator();
-        g_tx.send(GripperCommand { close: true });
-        world.consume_actuators_and_integrate_inner(Duration::from_millis(1));
+        g_tx.send(GripperCommand {
+            target_separation: 0.012,
+        });
+        // Phase 3.2: drive 60 ms for the gripper to slew closed.
+        for _ in 0..60 {
+            world.consume_actuators_and_integrate_inner(Duration::from_millis(1));
+        }
         let pose0 = world.scene.object(BLOCK_OBJECT_ID).unwrap().pose;
 
         // 100 ms of stepping; gravity is on, but the kinematic body
@@ -1629,8 +1727,15 @@ mod tests {
         ));
 
         let g_tx = world.attach_gripper_actuator();
-        g_tx.send(GripperCommand { close: true });
-        world.consume_actuators_and_integrate_inner(Duration::from_millis(1));
+        g_tx.send(GripperCommand {
+            target_separation: 0.012,
+        });
+        // Phase 3.2: gripper_separation slews at 0.5 m/s, so going from
+        // open (0.04) to below the closed threshold (0.02) takes ~40 ms.
+        // Drive 60 ms to be safely past the threshold.
+        for _ in 0..60 {
+            world.consume_actuators_and_integrate_inner(Duration::from_millis(1));
+        }
 
         assert_eq!(world.arm.state.grasped, Some(block_id));
         assert!(matches!(
@@ -1667,8 +1772,14 @@ mod tests {
 
         let v_tx = world.attach_joint_velocity_actuator(JointId(0));
         let g_tx = world.attach_gripper_actuator();
-        g_tx.send(GripperCommand { close: true });
-        world.consume_actuators_and_integrate_inner(Duration::from_millis(1));
+        g_tx.send(GripperCommand {
+            target_separation: 0.012,
+        });
+        // Phase 3.2: drive enough ticks for the gripper to slew closed
+        // (60 ms is comfortably past the 40 ms close threshold).
+        for _ in 0..60 {
+            world.consume_actuators_and_integrate_inner(Duration::from_millis(1));
+        }
         let pose_before = world.scene.object(block_id).unwrap().pose;
 
         v_tx.send(JointVelocityCommand {

@@ -15,10 +15,15 @@ pub struct ArmState {
     pub q_dot: Vec<f32>,
     pub gripper_closed: bool,
     /// Lateral distance (m) between the two finger centers along EE +y.
-    /// Initially `FINGER_OPEN_SEPARATION` (0.04 m). Driven by
-    /// `apply_gripper_command` in Phase 3.2 and consumed by the per-tick
-    /// finger-pose update in `consume_actuators_and_integrate_inner`.
+    /// Initially `FINGER_OPEN_SEPARATION` (0.04 m). Per-tick the world
+    /// drives this toward `gripper_target` at a fixed rate (Phase 3.2),
+    /// then writes the finger kinematic poses from the new value.
     pub gripper_separation: f32,
+    /// Most recent `GripperCommand.target_separation` the controller
+    /// asked for. The per-tick consume-actuators path drives
+    /// `gripper_separation` toward this value at 0.5 m/s. Initialized
+    /// to the open value so an arm with no controller stays open.
+    pub gripper_target: f32,
     pub grasped: Option<ObjectId>,
 }
 
@@ -29,9 +34,10 @@ impl ArmState {
             q_dot: vec![0.0; n_joints],
             gripper_closed: false,
             // Match `arm::FINGER_OPEN_SEPARATION` — kept as a literal here
-            // to avoid the cross-module dep; the constant is private to
-            // arm.rs but the value (0.04 m) is the canonical "open" value.
+            // to avoid the cross-module dep; the constant is the
+            // canonical "open" value (0.04 m).
             gripper_separation: 0.04,
+            gripper_target: 0.04,
             grasped: None,
         }
     }

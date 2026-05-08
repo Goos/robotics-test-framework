@@ -291,7 +291,9 @@ where
                 }
             }
             SearchAndPlaceState::CloseGripper(n) => {
-                self.gripper_tx.send(GripperCommand { close: true });
+                self.gripper_tx.send(GripperCommand {
+                    target_separation: 0.012,
+                });
                 self.halt_joints();
                 self.state = if n >= CLOSE_HOLD_TICKS {
                     SearchAndPlaceState::AscendWithBlock
@@ -302,7 +304,9 @@ where
             SearchAndPlaceState::AscendWithBlock => {
                 let cxy = self.contact_xy.expect("contact_xy persists after grasp");
                 let target = self.ik_target_for(cxy, PARK_Z);
-                self.gripper_tx.send(GripperCommand { close: true });
+                self.gripper_tx.send(GripperCommand {
+                    target_separation: 0.012,
+                });
                 self.drive_joints_toward(target);
                 if self.joints_converged_to(target) {
                     self.state = SearchAndPlaceState::YawToBin;
@@ -310,14 +314,18 @@ where
             }
             SearchAndPlaceState::YawToBin => {
                 let target = self.ik_target_for(self.target_bin_xy, PARK_Z);
-                self.gripper_tx.send(GripperCommand { close: true });
+                self.gripper_tx.send(GripperCommand {
+                    target_separation: 0.012,
+                });
                 self.drive_joints_toward(target);
                 if self.joints_converged_to(target) {
                     self.state = SearchAndPlaceState::OpenGripper(0);
                 }
             }
             SearchAndPlaceState::OpenGripper(n) => {
-                self.gripper_tx.send(GripperCommand { close: false });
+                self.gripper_tx.send(GripperCommand {
+                    target_separation: 0.04,
+                });
                 self.halt_joints();
                 self.state = if n >= OPEN_HOLD_TICKS {
                     SearchAndPlaceState::Done

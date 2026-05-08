@@ -70,15 +70,19 @@ fn object_grasped_then_released_falls_to_table() {
         .collect();
     let g_tx = world.attach_gripper_actuator();
 
-    // Phase 1: close gripper → grasp.
-    g_tx.send(GripperCommand { close: true });
-    for _ in 0..5 {
+    // Phase 1: close gripper → grasp. Phase 3.2 slews separation at
+    // 0.5 m/s, so going from open (0.04) to below the closed threshold
+    // (0.02) takes ~40 ms; drive 60 ms to be safely past.
+    g_tx.send(GripperCommand {
+        target_separation: 0.012,
+    });
+    for _ in 0..60 {
         world.consume_actuators_and_integrate_inner(Duration::from_millis(1));
     }
     assert_eq!(
         world.arm.state.grasped,
         Some(block_id),
-        "block should be grasped after 5 close ticks"
+        "block should be grasped after the gripper slews closed"
     );
 
     // Phase 2: hold position (no joint velocity sent).
@@ -91,9 +95,11 @@ fn object_grasped_then_released_falls_to_table() {
         "should still be grasped"
     );
 
-    // Phase 3: open gripper → release.
-    g_tx.send(GripperCommand { close: false });
-    for _ in 0..10 {
+    // Phase 3: open gripper → release. Same slew rate; drive 60 ms.
+    g_tx.send(GripperCommand {
+        target_separation: 0.04,
+    });
+    for _ in 0..60 {
         world.consume_actuators_and_integrate_inner(Duration::from_millis(1));
     }
     assert_eq!(world.arm.state.grasped, None, "block should be released");
