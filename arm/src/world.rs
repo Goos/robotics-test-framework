@@ -200,16 +200,19 @@ impl ArmWorld {
                 let ee = crate::fk::forward_kinematics(&arm.spec, &arm.state.q);
                 for slot in [crate::arm::FINGER_SLOT_PLUS, crate::arm::FINGER_SLOT_MINUS] {
                     let pose = crate::arm::finger_pose(ee, slot, arm.state.gripper_separation);
-                    // Step 3.1: insert as sensors so the Phase 1
-                    // kinematic-weld grasp keeps working (fingers
-                    // register contacts but don't push). Step 3.4
-                    // switches them to physical and removes the weld.
+                    // Step 3.4: fingers are physical (non-sensor)
+                    // colliders so the friction-grasp can pinch a
+                    // dynamic object between them. Phase 3.1 used
+                    // sensor-mode as a transitional bridge while the
+                    // kinematic-weld grasp was still in effect; that
+                    // weld is removed in Step 3.4 so fingers can now
+                    // exert real contact response.
                     pw.insert_finger(
                         arm.id,
                         slot,
                         pose,
                         crate::arm::FINGER_HALF_EXTENTS,
-                        /* is_sensor */ true,
+                        /* is_sensor */ false,
                     );
                 }
             }
@@ -528,21 +531,19 @@ impl ArmWorld {
                     rtf_sim::object::ObjectState::Free
                 };
             }
-        }
 
-        // Grasped object is welded to the EE — refresh its pose from the
-        // post-integration EE so the visualization and downstream queries see
-        // it move with the arm (design v2 §5.4). With Rapier, the body is
-        // KinematicPositionBased per Step 1.8; we also push the new pose
-        // into Rapier so the next physics step sees it (idempotent — body
-        // is already kinematic, set_object_kinematic just re-sets the pose).
-        if let Some(grasped_id) = self.arm.state.grasped {
-            let ee = self.ee_pose();
-            if let Some(obj) = self.scene.object_mut(grasped_id) {
-                obj.pose = ee;
-            }
-            #[cfg(feature = "physics-rapier")]
-            self.physics.set_object_kinematic(grasped_id, ee);
+            // Phase 3.4 friction-grasp derivation. Replaces the Phase 1
+            // kinematic-weld grasp: instead of switching the body to
+            // KinematicPositionBased on close-edge, the held object stays
+            // Dynamic and is pinched between the two finger colliders by
+            // friction. Per tick (after sync_to_scene + Settled-derivation)
+            // we recompute Grasped state purely from observation:
+            //   `Grasped` iff gripper_closed AND both fingers contact the
+            //   same graspable object.
+            // The arm.state.grasped pointer is also re-derived here so it
+            // tracks slip (object falls out of grip mid-motion → both
+            // fields back to None / Free in the same tick).
+            self.derive_friction_grasp_state();
         }
 
         // Advance authoritative sim time and the shared clock together.
@@ -569,18 +570,21 @@ impl ArmWorld {
         }
     }
 
-    /// Phase 3.2: rate at which `gripper_separation` slews toward
-    /// `gripper_target` (m/s). Set very high (50 m/s) for Step 3.2 so
-    /// the gripper effectively snaps in one tick — preserves Phase 1's
-    /// instantaneous-grasp timing through this commit. Step 3.4/3.5
-    /// drops this to a realistic 0.5 m/s once friction-grasp replaces
-    /// the kinematic weld; see plan for context.
-    const GRIPPER_SLEW_RATE_M_PER_S: f32 = 50.0;
+    /// Phase 3.4: realistic finger-close rate now that friction-grasp
+    /// replaces the kinematic weld. At 0.5 m/s the open→closed swing
+    /// (0.04 m → 0.012 m) takes ~56 ms — long enough for the contact
+    /// solver to build up steady friction force as the fingers pinch
+    /// and short enough that controllers don't have to wait noticeably
+    /// before checking grasp. Phase 3.2's transitional 50 m/s value
+    /// effectively snapped the gripper closed in one tick (kept the
+    /// Phase 1 weld timing through the API change); now obsolete.
+    const GRIPPER_SLEW_RATE_M_PER_S: f32 = 0.5;
     /// Below this separation (m) the gripper is considered closed and
-    /// will attempt to grasp the nearest graspable object.
+    /// eligible to friction-grasp.
     const GRIPPER_CLOSED_THRESHOLD_M: f32 = 0.02;
     /// Above this separation (m) the gripper is considered open and
-    /// will release any held object.
+    /// drops any held object. Hysteresis above the closed threshold so
+    /// a tiny separation wobble doesn't flap the state.
     const GRIPPER_OPEN_THRESHOLD_M: f32 = 0.035;
 
     /// Phase 3.2: latch the most recent gripper command into
@@ -591,12 +595,13 @@ impl ArmWorld {
         self.arm.state.gripper_target = cmd.target_separation;
     }
 
-    /// Phase 3.2: per-tick gripper update. (1) slews
+    /// Phase 3.4: per-tick gripper slew + closed-flag update. Slews
     /// `gripper_separation` toward `gripper_target` at
-    /// `GRIPPER_SLEW_RATE_M_PER_S`, (2) re-derives `gripper_closed` from
-    /// the new separation, (3) fires the grasp transition on
-    /// open→closed and the release transition on closed→open. Replaces
-    /// the v1 boolean-edge logic in `apply_gripper_command`.
+    /// `GRIPPER_SLEW_RATE_M_PER_S` and re-derives `gripper_closed` from
+    /// the new separation (with hysteresis between the closed/open
+    /// thresholds). Grasp / release transitions themselves are no longer
+    /// edge-triggered here — they're derived per tick from finger contact
+    /// in `derive_friction_grasp_state`, called after the physics step.
     fn update_gripper_separation_and_transitions(&mut self, dt: Duration) {
         let dt_s = dt.as_nanos() as f32 / 1.0e9_f32;
         let max_step = Self::GRIPPER_SLEW_RATE_M_PER_S * dt_s;
@@ -621,50 +626,66 @@ impl ArmWorld {
             next < Self::GRIPPER_CLOSED_THRESHOLD_M
         };
         self.arm.state.gripper_closed = now_closed;
+    }
 
-        // Opening transition: release any held object back to Free.
-        if was_closed && !now_closed {
-            if let Some(grasped_id) = self.arm.state.grasped.take() {
-                if let Some(obj) = self.scene.object_mut(grasped_id) {
-                    obj.state = rtf_sim::object::ObjectState::Free;
+    /// Phase 3.4: derive the per-object Grasped state and the
+    /// `arm.state.grasped` pointer from finger contacts. Called once per
+    /// tick after `physics.step + sync_to_scene + Settled-derivation`.
+    ///
+    /// Rules:
+    ///   - For each graspable Object with a Rapier body:
+    ///       * If gripper is closed AND both fingers are in contact with
+    ///         the object, set state to Grasped { by: this arm }.
+    ///       * Otherwise, if the object is currently Grasped by this arm,
+    ///         transition it back to Free (slip / open).
+    ///   - `arm.state.grasped` is set to the (deterministic) lowest
+    ///     ObjectId currently Grasped, or None.
+    ///
+    /// Iteration is by ObjectId (BTreeMap) so choice is deterministic
+    /// across runs.
+    #[cfg(feature = "physics-rapier")]
+    fn derive_friction_grasp_state(&mut self) {
+        let arm_id = self.arm.id;
+        let gripper_closed = self.arm.state.gripper_closed;
+        let mut new_grasped: Option<rtf_sim::object::ObjectId> = None;
+        // Collect ids first to avoid borrowing scene mutably while we
+        // also read the physics narrow-phase.
+        let ids: Vec<rtf_sim::object::ObjectId> = self.scene.objects().map(|(id, _)| *id).collect();
+        for id in ids {
+            let Some(obj) = self.scene.object(id) else {
+                continue;
+            };
+            if !obj.graspable {
+                continue;
+            }
+            let in_grip = gripper_closed
+                && self.physics.object_in_contact_with_fingers(
+                    id,
+                    arm_id,
+                    crate::arm::FINGER_SLOT_PLUS,
+                    crate::arm::FINGER_SLOT_MINUS,
+                );
+            let was_grasped = matches!(obj.state, rtf_sim::object::ObjectState::Grasped { .. });
+            if in_grip {
+                if !was_grasped {
+                    if let Some(o) = self.scene.object_mut(id) {
+                        o.state = rtf_sim::object::ObjectState::Grasped {
+                            by: rtf_sim::object::ArmRef(arm_id),
+                        };
+                    }
                 }
-                #[cfg(feature = "physics-rapier")]
-                self.physics.set_object_dynamic(grasped_id);
+                if new_grasped.is_none() {
+                    new_grasped = Some(id);
+                }
+            } else if was_grasped {
+                // Slip or open: drop back to Free; the next Settled-pass
+                // tick will reclassify if velocity falls below threshold.
+                if let Some(o) = self.scene.object_mut(id) {
+                    o.state = rtf_sim::object::ObjectState::Free;
+                }
             }
         }
-
-        // Closing transition (and nothing currently held): try to grasp
-        // the first graspable, not-already-Grasped object within
-        // proximity_threshold of the EE. Per design v2 §5.4, only
-        // `Grasped` is excluded — `Free` and `Settled` are both
-        // eligible (Phase 7's PickObject starts Settled on a table).
-        // Iteration is by ObjectId (BTreeMap) so the choice is
-        // deterministic.
-        if !was_closed && now_closed && self.arm.state.grasped.is_none() {
-            let ee = self.ee_pose();
-            let threshold = self.arm.spec.gripper.proximity_threshold;
-            let arm_id = self.arm.id;
-            let to_grasp = self.scene.objects().find_map(|(id, obj)| {
-                if !obj.graspable {
-                    return None;
-                }
-                if matches!(obj.state, rtf_sim::object::ObjectState::Grasped { .. }) {
-                    return None;
-                }
-                let dist = (obj.pose.translation.vector - ee.translation.vector).norm();
-                (dist <= threshold).then_some(*id)
-            });
-            if let Some(id) = to_grasp {
-                self.arm.state.grasped = Some(id);
-                if let Some(obj) = self.scene.object_mut(id) {
-                    obj.state = rtf_sim::object::ObjectState::Grasped {
-                        by: rtf_sim::object::ArmRef(arm_id),
-                    };
-                }
-                #[cfg(feature = "physics-rapier")]
-                self.physics.set_object_kinematic(id, ee);
-            }
-        }
+        self.arm.state.grasped = new_grasped;
     }
 
     /// Advance every sensor scheduler by `dt` and publish a fresh reading on
@@ -941,26 +962,32 @@ mod tests {
 
     #[test]
     fn gripper_separation_converges_to_target() {
-        // Phase 3.2: GripperCommand{ target_separation } drives the
-        // separation toward the target each tick. Open → close should
-        // converge within `(0.04 - 0.012) / SLEW_RATE` seconds; with
-        // the Step 3.2 placeholder slew rate (50 m/s) it converges in
-        // one tick.
+        // Phase 3.4: GripperCommand{ target_separation } drives the
+        // separation toward the target each tick at 0.5 m/s. Open →
+        // close (0.04 → 0.012) takes ~56 ms. Drive 200 ms to be safely
+        // past convergence.
         let mut world = ArmWorld::new(Scene::new(0), simple_spec(), false);
         let g_tx = world.attach_gripper_actuator();
         let initial = world.arm.state.gripper_separation;
         g_tx.send(GripperCommand {
             target_separation: 0.012,
         });
+        // After 1 ms at 0.5 m/s the separation drops by 0.5e-3 = 0.0005 m,
+        // so initial - after ≈ 0.0005.
         world.consume_actuators_and_integrate_inner(Duration::from_millis(1));
-        let after = world.arm.state.gripper_separation;
+        let after_1ms = world.arm.state.gripper_separation;
         assert!(
-            after < initial,
-            "separation should decrease toward target: initial={initial}, after={after}"
+            after_1ms < initial,
+            "separation should decrease toward target: initial={initial}, after_1ms={after_1ms}"
         );
+        // Drive to convergence and assert we hit the target.
+        for _ in 0..200 {
+            world.consume_actuators_and_integrate_inner(Duration::from_millis(1));
+        }
+        let after_200ms = world.arm.state.gripper_separation;
         assert!(
-            (after - 0.012).abs() < 1e-3,
-            "separation should reach target within 1 tick at the placeholder slew rate; got {after}"
+            (after_200ms - 0.012).abs() < 1e-4,
+            "separation should converge to target after 200 ms; got {after_200ms}"
         );
     }
 
@@ -968,16 +995,18 @@ mod tests {
     fn existing_grasp_threshold_semantics_preserved() {
         // Phase 3.2: closing the gripper (separation drops below the
         // 0.02 m closed-threshold) flips `gripper_closed` from false to
-        // true, exactly like the v1 boolean API used to.
+        // true, exactly like the v1 boolean API used to. Phase 3.4
+        // slowed the slew to 0.5 m/s, so it takes ~40 ms (not one tick)
+        // to cross the threshold.
         let mut world = ArmWorld::new(Scene::new(0), simple_spec(), false);
         let g_tx = world.attach_gripper_actuator();
         assert!(!world.arm.state.gripper_closed);
         g_tx.send(GripperCommand {
             target_separation: 0.012,
         });
-        // One tick suffices at the placeholder slew rate; future slow
-        // slew will need a few more.
-        world.consume_actuators_and_integrate_inner(Duration::from_millis(1));
+        for _ in 0..100 {
+            world.consume_actuators_and_integrate_inner(Duration::from_millis(1));
+        }
         assert!(world.arm.state.gripper_closed);
     }
 
@@ -1308,74 +1337,21 @@ mod tests {
 
     #[cfg(feature = "physics-rapier")]
     #[test]
-    fn grasp_switches_body_to_kinematic() {
-        // Reuse the simple gravity-off test rig (`moving_ee_spec`) so
-        // the block stays where we put it during the gripper slew.
-        // build_pick_and_place_world's gravity-on world is too lively
-        // for a per-tick close test (block falls during the 60 ms slew).
-        use nalgebra::Isometry3;
-        use rtf_sim::object::{Object, ObjectId};
-        use rtf_sim::physics::world::RigidBodyType;
-        use rtf_sim::shape::Shape;
-
-        // moving_ee_spec has 2 joints with link offsets of 0.5 m in +x,
-        // so EE at q=(0,0) sits at (1.0, 0, 0). Place sphere there.
-        let mut scene = Scene::new(0);
-        scene.insert_object(Object::new(
-            ObjectId(1),
-            Isometry3::translation(1.0, 0.0, 0.0),
-            Shape::Sphere { radius: 0.005 },
-            0.1,
-            true,
-        ));
-        let mut world = ArmWorld::new(scene, moving_ee_spec(), /* gravity */ false);
-
-        let g_tx = world.attach_gripper_actuator();
-        g_tx.send(GripperCommand {
-            target_separation: 0.012,
-        });
-        // Phase 3.2: slew 60 ms so separation crosses the 0.02 m
-        // closed-threshold and the grasp transition fires.
-        for _ in 0..60 {
-            world.consume_actuators_and_integrate_inner(Duration::from_millis(1));
-        }
-
-        let h = world.physics().object_handle(ObjectId(1)).unwrap();
-        assert_eq!(
-            world.physics().body_type(h),
-            Some(RigidBodyType::KinematicPositionBased),
-            "grasp should flip body to KinematicPositionBased"
-        );
-    }
-
-    #[cfg(feature = "physics-rapier")]
-    #[test]
-    fn release_switches_body_back_to_dynamic() {
+    fn object_body_stays_dynamic_under_friction_grasp() {
+        // Phase 3.4: with friction-grasp replacing the kinematic weld,
+        // a graspable object's Rapier body must stay Dynamic at all times
+        // (the body type never flips). This locks the regression — if
+        // anyone re-introduces `set_object_kinematic` on grasp, this test
+        // catches it.
         use crate::test_helpers::{build_pick_and_place_world, BLOCK_OBJECT_ID};
         use rtf_sim::physics::world::RigidBodyType;
 
         let mut world = build_pick_and_place_world();
-        world.arm.state.q = vec![
-            0.0,
-            core::f32::consts::FRAC_PI_4,
-            core::f32::consts::FRAC_PI_2,
-        ];
-        let ee = world.ee_pose();
-        if let Some(obj) = world.scene.object_mut(BLOCK_OBJECT_ID) {
-            obj.pose = ee;
-        }
         let g_tx = world.attach_gripper_actuator();
         g_tx.send(GripperCommand {
             target_separation: 0.012,
         });
-        // Phase 3.2: drive close + release each through their slew.
-        for _ in 0..60 {
-            world.consume_actuators_and_integrate_inner(Duration::from_millis(1));
-        }
-        g_tx.send(GripperCommand {
-            target_separation: 0.04,
-        });
-        for _ in 0..60 {
+        for _ in 0..200 {
             world.consume_actuators_and_integrate_inner(Duration::from_millis(1));
         }
 
@@ -1383,45 +1359,258 @@ mod tests {
         assert_eq!(
             world.physics().body_type(h),
             Some(RigidBodyType::Dynamic),
-            "release should flip body back to Dynamic"
+            "graspable object body must stay Dynamic under friction-grasp"
         );
     }
 
     #[cfg(feature = "physics-rapier")]
     #[test]
-    fn grasped_object_does_not_fall_under_gravity() {
-        use crate::test_helpers::{build_pick_and_place_world, BLOCK_OBJECT_ID};
+    fn object_grasped_when_fingers_close_around_it() {
+        // Phase 3.4: place a small graspable block centered in the open
+        // finger gap, close the gripper, step long enough for the contact
+        // solver to register both finger contacts, and assert the object
+        // state transitions to Grasped.
+        //
+        // simple_spec has the EE at (0, 0, 0.2) (two 0.1 m +z link
+        // offsets). Fingers protrude in EE +z by FINGER_FORWARD_OFFSET =
+        // 0.04 m and have half_extents.z = 0.04 m so they extend
+        // 0.0..0.08 m beyond the EE. Place the block centered between
+        // the fingers (xy = ee.xy, z = ee.z + 0.04 — middle of the
+        // finger length). Make the block slightly larger than
+        // FINGER_CLOSED_SEPARATION so the closing fingers actually
+        // pinch it (cube half-extent 0.008 → full width 0.016 vs closed
+        // separation 0.012).
+        use nalgebra::{Isometry3, Vector3};
+        use rtf_sim::object::{Object, ObjectId, ObjectState};
+        use rtf_sim::shape::Shape;
 
-        let mut world = build_pick_and_place_world();
-        world.arm.state.q = vec![
-            0.0,
-            core::f32::consts::FRAC_PI_4,
-            core::f32::consts::FRAC_PI_2,
-        ];
-        let ee = world.ee_pose();
-        if let Some(obj) = world.scene.object_mut(BLOCK_OBJECT_ID) {
-            obj.pose = ee;
-        }
+        let mut scene = Scene::new(0);
+        let block_id = ObjectId(1);
+        // Block sits below at z=0; we'll place it at the EE finger zone.
+        scene.insert_object(Object {
+            id: block_id,
+            pose: Isometry3::translation(0.0, 0.0, 0.24),
+            shape: Shape::Aabb {
+                half_extents: Vector3::new(0.008, 0.008, 0.008),
+            },
+            mass: 0.05,
+            graspable: true,
+            state: ObjectState::Free,
+            friction: 2.0,
+            lin_vel: Vector3::zeros(),
+        });
+        // Gravity off so the block stays put while the fingers slew.
+        let mut world = ArmWorld::new(scene, simple_spec(), /* gravity */ false);
+
         let g_tx = world.attach_gripper_actuator();
         g_tx.send(GripperCommand {
             target_separation: 0.012,
         });
-        // Phase 3.2: drive 60 ms for the gripper to slew closed.
-        for _ in 0..60 {
+        // Phase 3.4: slew rate 0.5 m/s → 56 ms to close + extra ticks
+        // for the contact solver to lock in. 200 ms is comfortably past.
+        for _ in 0..200 {
             world.consume_actuators_and_integrate_inner(Duration::from_millis(1));
         }
-        let pose0 = world.scene.object(BLOCK_OBJECT_ID).unwrap().pose;
 
-        // 100 ms of stepping; gravity is on, but the kinematic body
-        // gets re-set to EE each tick → should not move.
-        for _ in 0..100 {
+        let st = world.scene.object(block_id).unwrap().state.clone();
+        assert!(
+            matches!(st, ObjectState::Grasped { .. }),
+            "expected friction-grasp to register Grasped; got {st:?}"
+        );
+        assert_eq!(
+            world.arm.state.grasped,
+            Some(block_id),
+            "arm.state.grasped should track the friction-grasped object"
+        );
+    }
+
+    #[cfg(feature = "physics-rapier")]
+    #[test]
+    fn object_falls_out_of_grip_when_gripper_opens() {
+        // Phase 3.4: the friction-grasp derivation re-runs every tick.
+        // Opening the gripper (separation crosses 0.035 m) breaks the
+        // finger-vs-object contact in the very next physics step, so the
+        // object state should transition Grasped → (Free or Settled),
+        // and arm.state.grasped should clear.
+        use nalgebra::{Isometry3, Vector3};
+        use rtf_sim::object::{Object, ObjectId, ObjectState};
+        use rtf_sim::shape::Shape;
+
+        let mut scene = Scene::new(0);
+        let block_id = ObjectId(1);
+        scene.insert_object(Object {
+            id: block_id,
+            pose: Isometry3::translation(0.0, 0.0, 0.24),
+            shape: Shape::Aabb {
+                half_extents: Vector3::new(0.008, 0.008, 0.008),
+            },
+            mass: 0.05,
+            graspable: true,
+            state: ObjectState::Free,
+            friction: 2.0,
+            lin_vel: Vector3::zeros(),
+        });
+        let mut world = ArmWorld::new(scene, simple_spec(), /* gravity */ false);
+
+        let g_tx = world.attach_gripper_actuator();
+        g_tx.send(GripperCommand {
+            target_separation: 0.012,
+        });
+        for _ in 0..200 {
             world.consume_actuators_and_integrate_inner(Duration::from_millis(1));
         }
-        let pose1 = world.scene.object(BLOCK_OBJECT_ID).unwrap().pose;
-        let drift = (pose1.translation.vector - pose0.translation.vector).norm();
+        assert_eq!(world.arm.state.grasped, Some(block_id), "precondition");
+
+        // Open the gripper.
+        g_tx.send(GripperCommand {
+            target_separation: 0.04,
+        });
+        for _ in 0..200 {
+            world.consume_actuators_and_integrate_inner(Duration::from_millis(1));
+        }
         assert!(
-            drift < 1e-3,
-            "grasped object drifted {drift} m (should be ~0)"
+            world.arm.state.grasped.is_none(),
+            "arm.state.grasped should clear after release"
+        );
+        let st = world.scene.object(block_id).unwrap().state.clone();
+        assert!(
+            !matches!(st, ObjectState::Grasped { .. }),
+            "object state should leave Grasped after release; got {st:?}"
+        );
+    }
+
+    #[cfg(feature = "physics-rapier")]
+    #[test]
+    fn object_falls_out_of_grip_under_high_acceleration() {
+        // Phase 3.4: friction-grasp can slip. With finger friction = 1.0
+        // and a moderate object mass, accelerating the arm fast enough
+        // (J0 yaw ~10 rad/s applied as a step, while the object is held
+        // 0.5 m out from the rotation axis) generates a centripetal
+        // requirement that exceeds available friction force. The object
+        // slides free (Grasped → Free) — exactly the failure mode v1
+        // couldn't model.
+        use nalgebra::{Isometry3, Vector3};
+        use rtf_sim::object::{Object, ObjectId, ObjectState};
+        use rtf_sim::shape::Shape;
+
+        // moving_ee_spec: J0 z-axis, J1 z-axis, link offsets 0.5 m in +x
+        // each. EE at q=(0,0) is at (1.0, 0, 0). Place the block at the
+        // EE finger zone (slightly +z of the EE since fingers protrude
+        // along EE +z, but for moving_ee_spec EE +z = world +z).
+        let mut scene = Scene::new(0);
+        let block_id = ObjectId(1);
+        scene.insert_object(Object {
+            id: block_id,
+            pose: Isometry3::translation(1.0, 0.0, 0.04),
+            shape: Shape::Aabb {
+                half_extents: Vector3::new(0.008, 0.008, 0.008),
+            },
+            mass: 0.2, // heavier — easier to slip
+            graspable: true,
+            state: ObjectState::Free,
+            friction: 0.3, // low μ — slips under modest centripetal load
+            lin_vel: Vector3::zeros(),
+        });
+        let mut world = ArmWorld::new(scene, moving_ee_spec(), /* gravity */ false);
+
+        let g_tx = world.attach_gripper_actuator();
+        g_tx.send(GripperCommand {
+            target_separation: 0.012,
+        });
+        // Settle the grip first.
+        for _ in 0..200 {
+            world.consume_actuators_and_integrate_inner(Duration::from_millis(1));
+        }
+        // Confirm grip established before perturbing.
+        assert_eq!(
+            world.arm.state.grasped,
+            Some(block_id),
+            "precondition: friction grip established"
+        );
+
+        // Apply a large J0 velocity step and let the object swing out.
+        let v_tx = world.attach_joint_velocity_actuator(JointId(0));
+        v_tx.send(JointVelocityCommand {
+            joint: JointId(0),
+            q_dot_target: 10.0,
+        });
+        for _ in 0..500 {
+            world.consume_actuators_and_integrate_inner(Duration::from_millis(1));
+        }
+
+        let st = world.scene.object(block_id).unwrap().state.clone();
+        assert!(
+            !matches!(st, ObjectState::Grasped { .. }),
+            "expected slip (Grasped → Free) under high centripetal load; got {st:?}"
+        );
+        assert!(
+            world.arm.state.grasped.is_none(),
+            "arm.state.grasped should clear on slip"
+        );
+    }
+
+    #[cfg(feature = "physics-rapier")]
+    #[test]
+    fn friction_grasp_holds_object_against_gravity() {
+        // Phase 3.4: friction-grasp must support the object's weight when
+        // the fingers are closed around it. Place a small block between
+        // the fingers, close, hold for 200 ms in gravity, then assert
+        // the block hasn't fallen far (within slip tolerance — a real
+        // friction grip can sag a few mm in the first solver settle, but
+        // doesn't free-fall).
+        use nalgebra::{Isometry3, Vector3};
+        use rtf_sim::object::{Object, ObjectId, ObjectState};
+        use rtf_sim::shape::Shape;
+
+        let mut scene = Scene::new(0);
+        let block_id = ObjectId(1);
+        // Small low-mass block placed in the open finger gap. Mass 0.05 kg
+        // → weight 0.49 N — well within the friction headroom of a μ=2
+        // pinch with normal force from the finger interpenetration.
+        scene.insert_object(Object {
+            id: block_id,
+            pose: Isometry3::translation(0.0, 0.0, 0.24),
+            shape: Shape::Aabb {
+                half_extents: Vector3::new(0.008, 0.008, 0.008),
+            },
+            mass: 0.05,
+            graspable: true,
+            state: ObjectState::Free,
+            friction: 2.0,
+            lin_vel: Vector3::zeros(),
+        });
+        let mut world = ArmWorld::new(scene, simple_spec(), /* gravity */ true);
+
+        let g_tx = world.attach_gripper_actuator();
+        g_tx.send(GripperCommand {
+            target_separation: 0.012,
+        });
+        // 200 ms to slew closed + let solver settle the friction grip.
+        for _ in 0..200 {
+            world.consume_actuators_and_integrate_inner(Duration::from_millis(1));
+        }
+        assert_eq!(
+            world.arm.state.grasped,
+            Some(block_id),
+            "precondition: friction grip established"
+        );
+        let pose0 = world.scene.object(block_id).unwrap().pose;
+
+        // Hold for another 200 ms — gravity tries to pull the block down.
+        for _ in 0..200 {
+            world.consume_actuators_and_integrate_inner(Duration::from_millis(1));
+        }
+        let pose1 = world.scene.object(block_id).unwrap().pose;
+        let dz = pose0.translation.z - pose1.translation.z;
+        assert!(
+            dz < 0.005,
+            "friction grip should support the block — sagged {dz:.4} m in 200 ms"
+        );
+        // Sanity: still grasped at end (didn't slip out).
+        assert_eq!(
+            world.arm.state.grasped,
+            Some(block_id),
+            "friction grip should still hold after gravity hold"
         );
     }
 
@@ -1505,32 +1694,45 @@ mod tests {
 
     #[cfg(feature = "physics-rapier")]
     #[test]
-    fn grasped_object_state_unchanged_by_settled_logic() {
-        use nalgebra::Isometry3;
-        use rtf_sim::object::{ArmRef, Object, ObjectId, ObjectState};
+    fn grasped_state_survives_settled_derivation_when_friction_grip_holds() {
+        // Phase 3.4: under friction-grasp, an object's `Grasped` state is
+        // re-derived per tick from finger contacts. The Settled-derivation
+        // pass that runs immediately before must not clobber it: the
+        // Grasped match-arm in that pass `continue`s past Grasped objects.
+        // To test this end-to-end we set up an actual friction grip and
+        // verify the state stays Grasped through many ticks (during which
+        // the Settled pass would otherwise re-classify the now-resting,
+        // pinched object as Settled).
+        use nalgebra::{Isometry3, Vector3};
+        use rtf_sim::object::{Object, ObjectId, ObjectState};
         use rtf_sim::shape::Shape;
 
         let mut scene = Scene::new(0);
-        scene.insert_object(Object::new(
-            ObjectId(1),
-            Isometry3::translation(0.0, 0.0, 0.5),
-            Shape::Sphere { radius: 0.05 },
-            0.1,
-            true,
-        ));
-        let mut world = ArmWorld::new(scene, simple_spec(), true);
-        // Force-set Grasped (bypass apply_gripper_command for test
-        // simplicity) — Step 1.8 will wire the proper kinematic-flip.
-        let obj = world.scene.object_mut(ObjectId(1)).unwrap();
-        obj.state = ObjectState::Grasped { by: ArmRef(0) };
-
-        for _ in 0..100 {
+        scene.insert_object(Object {
+            id: ObjectId(1),
+            pose: Isometry3::translation(0.0, 0.0, 0.24),
+            shape: Shape::Aabb {
+                half_extents: Vector3::new(0.008, 0.008, 0.008),
+            },
+            mass: 0.05,
+            graspable: true,
+            state: ObjectState::Free,
+            friction: 2.0,
+            lin_vel: Vector3::zeros(),
+        });
+        let mut world = ArmWorld::new(scene, simple_spec(), /* gravity */ false);
+        let g_tx = world.attach_gripper_actuator();
+        g_tx.send(GripperCommand {
+            target_separation: 0.012,
+        });
+        // Establish + maintain the grip for 300 ms.
+        for _ in 0..300 {
             world.consume_actuators_and_integrate_inner(Duration::from_millis(1));
         }
         let obj = world.scene.object(ObjectId(1)).unwrap();
         assert!(
             matches!(obj.state, ObjectState::Grasped { .. }),
-            "Grasped state should survive the Settled-derivation pass; got {:?}",
+            "Grasped state should hold across the Settled-derivation pass; got {:?}",
             obj.state
         );
     }
@@ -1711,29 +1913,50 @@ mod tests {
 
     #[test]
     fn closing_gripper_near_graspable_object_attaches_it() {
+        // Phase 3.4: friction-grasp requires the object to actually be
+        // between the fingers (not just within proximity) when they close.
+        // simple_spec EE sits at (0, 0, 0.2); fingers protrude in EE +z,
+        // so place the sphere at z=0.24 (middle of the finger length).
+        // Per the `finger_pose` formula, finger PLUS sits at y=+separation
+        // and finger MINUS at y=-separation, so each finger center is
+        // `target_separation` away from the EE +y axis — at the closed
+        // value 0.012, finger inner face = 0.012 - FINGER_HALF_EXTENTS.y
+        // = 0.002 m. A 0.015 m radius sphere extends to ±0.015 m and is
+        // therefore squeezed by ~13 mm per side once fingers reach close —
+        // ample contact for the friction grip.
+        //
+        // Note: the sphere must be inserted into the Scene BEFORE
+        // constructing ArmWorld, because `ArmWorld::new` is the only
+        // place that mirrors scene Objects into the Rapier PhysicsWorld
+        // (`scene.insert_object` later in the test would only update the
+        // domain scene, leaving Rapier without a body for the sphere).
+        use nalgebra::Isometry3;
         use rtf_core::time::Duration;
         use rtf_sim::object::{Object, ObjectId, ObjectState};
         use rtf_sim::shape::Shape;
 
-        let mut world = ArmWorld::new(Scene::new(0), simple_spec(), true);
-        let ee = world.ee_pose();
         let block_id = ObjectId(42);
-        world.scene.insert_object(Object::new(
+        // simple_spec EE pose at q=0 is identity translation (0,0,0.2).
+        let mut scene = Scene::new(0);
+        scene.insert_object(Object::new(
             block_id,
-            ee,
-            Shape::Sphere { radius: 0.01 },
+            Isometry3::translation(0.0, 0.0, 0.24),
+            Shape::Sphere { radius: 0.015 },
             0.1,
             /* graspable */ true,
         ));
+        // Gravity off so the unsupported sphere doesn't fall during
+        // the slew window.
+        let mut world = ArmWorld::new(scene, simple_spec(), false);
 
         let g_tx = world.attach_gripper_actuator();
         g_tx.send(GripperCommand {
             target_separation: 0.012,
         });
-        // Phase 3.2: gripper_separation slews at 0.5 m/s, so going from
-        // open (0.04) to below the closed threshold (0.02) takes ~40 ms.
-        // Drive 60 ms to be safely past the threshold.
-        for _ in 0..60 {
+        // Phase 3.4: gripper_separation slews at 0.5 m/s, so closing
+        // (0.04 → 0.012) takes ~56 ms. Drive 200 ms to give the contact
+        // solver time to register both finger contacts.
+        for _ in 0..200 {
             world.consume_actuators_and_integrate_inner(Duration::from_millis(1));
         }
 
@@ -1756,45 +1979,68 @@ mod tests {
 
     #[test]
     fn grasped_object_pose_tracks_ee() {
+        // Phase 3.4: under friction-grasp, the held object isn't welded
+        // to the EE — it's pinched between the fingers and follows the EE
+        // by physical contact. So "tracks EE" means: when the arm moves,
+        // the object moves in roughly the same direction (within friction
+        // tolerance), staying close to the EE position. We loosen the
+        // tolerance to ~5 cm (vs the old 0.1 mm under kinematic weld).
+        //
+        // Sphere is inserted into the Scene before constructing ArmWorld
+        // so that ArmWorld::new mirrors it into the Rapier physics world.
+        use nalgebra::Isometry3;
         use rtf_core::time::Duration;
         use rtf_sim::object::{Object, ObjectId};
         use rtf_sim::shape::Shape;
 
-        let mut world = ArmWorld::new(Scene::new(0), moving_ee_spec(), true);
+        // Compute EE at q=0 for moving_ee_spec: link_offsets are (0.5, 0, 0)
+        // each, so EE = (1.0, 0, 0). Sphere placed at EE + 0.04 in +z so
+        // it sits between the fingers (which protrude in EE +z = world +z
+        // at q=0).
         let block_id = ObjectId(42);
-        world.scene.insert_object(Object::new(
+        let mut scene = Scene::new(0);
+        scene.insert_object(Object::new(
             block_id,
-            world.ee_pose(),
-            Shape::Sphere { radius: 0.01 },
+            Isometry3::translation(1.0, 0.0, 0.04),
+            Shape::Sphere { radius: 0.015 },
             0.1,
             true,
         ));
+        // Gravity off so the unsupported sphere doesn't fall during
+        // the slew window.
+        let mut world = ArmWorld::new(scene, moving_ee_spec(), false);
 
         let v_tx = world.attach_joint_velocity_actuator(JointId(0));
         let g_tx = world.attach_gripper_actuator();
         g_tx.send(GripperCommand {
             target_separation: 0.012,
         });
-        // Phase 3.2: drive enough ticks for the gripper to slew closed
-        // (60 ms is comfortably past the 40 ms close threshold).
-        for _ in 0..60 {
+        // Phase 3.4: 200 ms to let the friction grip settle.
+        for _ in 0..200 {
             world.consume_actuators_and_integrate_inner(Duration::from_millis(1));
         }
         let pose_before = world.scene.object(block_id).unwrap().pose;
 
+        // Drive J0 slowly so the friction grip can keep up.
         v_tx.send(JointVelocityCommand {
             joint: JointId(0),
-            q_dot_target: 1.0,
+            q_dot_target: 0.2,
         });
-        world.consume_actuators_and_integrate_inner(Duration::from_millis(50));
+        for _ in 0..200 {
+            world.consume_actuators_and_integrate_inner(Duration::from_millis(1));
+        }
         let pose_after = world.scene.object(block_id).unwrap().pose;
 
         assert_ne!(
-            pose_before.translation.vector,
-            pose_after.translation.vector
+            pose_before.translation.vector, pose_after.translation.vector,
+            "block should have moved with the arm"
         );
         let ee = world.ee_pose();
-        assert!((pose_after.translation.vector - ee.translation.vector).norm() < 1e-4);
+        let dist = (pose_after.translation.vector - ee.translation.vector).norm();
+        assert!(
+            dist < 0.05,
+            "block should stay near the EE under friction grasp; got {dist:.4} m",
+        );
     }
 
     #[test]

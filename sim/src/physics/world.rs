@@ -232,12 +232,12 @@ impl PhysicsWorld {
     /// solver locking up.
     ///
     /// `is_sensor` controls whether the finger collider applies physical
-    /// contact response. Phase 3.1 inserts fingers as sensors so the
-    /// existing Phase 1 kinematic-weld grasp still works (fingers register
-    /// contacts via the narrow phase but don't push the held object away
-    /// or collide with the table during sweep). Phase 3.4 will switch
-    /// fingers to non-sensor (physical) and remove the kinematic-weld so
-    /// the held object is pinched between the two fingers by friction.
+    /// contact response. Phase 3.4 (friction-grasp) inserts fingers as
+    /// non-sensor (physical) so the held object is pinched between the
+    /// two fingers by friction; Phase 3.1's sensor-mode existed only as
+    /// a transitional bridge for the kinematic-weld grasp and is now
+    /// unused by callers. The flag is kept in the API for tests / future
+    /// scenarios that want sensor-only finger behaviour.
     pub fn insert_finger(
         &mut self,
         arm_id: u32,
@@ -264,6 +264,72 @@ impl PhysicsWorld {
     /// for tests that want to peek at finger body state.
     pub fn finger_handle(&self, arm_id: u32, slot: u32) -> Option<RigidBodyHandle> {
         self.arm_finger_bodies.get(&(arm_id, slot)).copied()
+    }
+
+    /// True iff the object's collider is currently in contact with BOTH
+    /// fingers of arm `arm_id`. Used by Phase 3.4's friction-grasp derivation:
+    /// `Grasped` requires the gripper to be closed AND both fingers to be
+    /// touching the same object (so it's pinched between them, not just
+    /// brushed by one finger).
+    ///
+    /// We walk `narrow_phase.contact_pairs()` (rather than the keyed
+    /// `contact_pair(a, b)` lookup) because the pair index in rapier3d is
+    /// sensitive to insertion order — a finger-then-object scene and an
+    /// object-then-finger scene would key the pair differently. Iterating
+    /// all pairs and filtering on collider identity is robust to either.
+    /// A pair is "in contact" iff `has_any_active_contact`.
+    pub fn object_in_contact_with_fingers(
+        &self,
+        obj_id: ObjectId,
+        arm_id: u32,
+        slot_plus: u32,
+        slot_minus: u32,
+    ) -> bool {
+        let Some(obj_body) = self.object_bodies.get(&obj_id).copied() else {
+            return false;
+        };
+        let Some(obj_collider) = self
+            .rigid_body_set
+            .get(obj_body)
+            .and_then(|b| b.colliders().first().copied())
+        else {
+            return false;
+        };
+        let finger_collider = |finger_slot: u32| -> Option<rapier3d::geometry::ColliderHandle> {
+            let h = self
+                .arm_finger_bodies
+                .get(&(arm_id, finger_slot))
+                .copied()?;
+            self.rigid_body_set.get(h)?.colliders().first().copied()
+        };
+        let Some(plus_col) = finger_collider(slot_plus) else {
+            return false;
+        };
+        let Some(minus_col) = finger_collider(slot_minus) else {
+            return false;
+        };
+        let mut plus_touch = false;
+        let mut minus_touch = false;
+        for pair in self.narrow_phase.contact_pairs() {
+            if !pair.has_any_active_contact {
+                continue;
+            }
+            let (a, b) = (pair.collider1, pair.collider2);
+            let touches_obj = a == obj_collider || b == obj_collider;
+            if !touches_obj {
+                continue;
+            }
+            if a == plus_col || b == plus_col {
+                plus_touch = true;
+            }
+            if a == minus_col || b == minus_col {
+                minus_touch = true;
+            }
+            if plus_touch && minus_touch {
+                return true;
+            }
+        }
+        plus_touch && minus_touch
     }
 
     /// Lookup the Rapier handle for an Object. Returns `None` if the
