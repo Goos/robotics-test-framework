@@ -21,8 +21,15 @@ use rtf_harness::Termination;
 use rtf_harness::{run, RunConfig};
 
 fn run_reach_pose(rrd_name: &str) -> rtf_harness::RunResult {
+    run_reach_pose_with(rrd_name, /* debug_overlay */ false)
+}
+
+fn run_reach_pose_with(rrd_name: &str, debug_overlay: bool) -> rtf_harness::RunResult {
     let _ = rrd_name; // used only when viz-rerun is on
     let mut world = build_simple_arm_world(3);
+    if debug_overlay {
+        world.enable_debug_overlay(true);
+    }
     let ports = world.attach_standard_arm_ports();
 
     let target_q = vec![0.5_f32; 3];
@@ -38,6 +45,9 @@ fn run_reach_pose(rrd_name: &str) -> rtf_harness::RunResult {
 
     #[cfg(feature = "viz-rerun")]
     {
+        if std::env::var("RTF_DEBUG_OVERLAY").as_deref() == Ok("1") {
+            world.enable_debug_overlay(true);
+        }
         match rtf_viz::maybe_recorder_for(rrd_name) {
             Some(rec) => run(world, controller, goal, cfg.with_recorder(rec)),
             None => run(world, controller, goal, cfg),
@@ -79,5 +89,17 @@ fn pd_reaches_target_pose_within_2_seconds() {
         res.final_time > rtf_core::time::Time::from_millis(1),
         "suspicious: GoalComplete fired at t={:?} — likely degenerate test geometry",
         res.final_time
+    );
+}
+
+/// Sanity-check: the Rapier debug overlay doesn't break ReachPose.
+#[test]
+fn pd_reaches_target_pose_with_debug_overlay() {
+    let res = run_reach_pose_with("pd_reaches_target_pose_overlay", true);
+    assert!(
+        matches!(res.terminated_by, Termination::GoalComplete),
+        "ReachPose (overlay on) did not converge; terminated_by={:?}, score={}",
+        res.terminated_by,
+        res.score.value,
     );
 }

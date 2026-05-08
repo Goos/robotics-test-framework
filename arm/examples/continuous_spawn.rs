@@ -548,9 +548,20 @@ const SPAWN_INTERVAL_SECS: i64 = 15;
 const DEADLINE_SECS: i64 = 90;
 
 fn run_continuous_spawn(seed: u64, rrd_name: &str) -> rtf_harness::RunResult {
+    run_continuous_spawn_with(seed, rrd_name, /* debug_overlay */ false)
+}
+
+fn run_continuous_spawn_with(
+    seed: u64,
+    rrd_name: &str,
+    debug_overlay: bool,
+) -> rtf_harness::RunResult {
     let _ = rrd_name; // used only when viz-rerun is on
     let mut world =
         build_continuous_spawn_world(seed, N_SPAWNS, Duration::from_secs(SPAWN_INTERVAL_SECS));
+    if debug_overlay {
+        world.enable_debug_overlay(true);
+    }
     let ports = world.attach_standard_arm_ports();
     let ee_pose_rx = world.attach_ee_pose_sensor(RateHz::new(100));
     let pressure_rx = world.attach_pressure_sensor(RateHz::new(1000), 0.03);
@@ -586,6 +597,9 @@ fn run_continuous_spawn(seed: u64, rrd_name: &str) -> rtf_harness::RunResult {
 
     #[cfg(feature = "viz-rerun")]
     {
+        if std::env::var("RTF_DEBUG_OVERLAY").as_deref() == Ok("1") {
+            world.enable_debug_overlay(true);
+        }
         match rtf_viz::maybe_recorder_for(rrd_name) {
             Some(rec) => run(world, controller, goal, cfg.with_recorder(rec)),
             None => run(world, controller, goal, cfg),
@@ -653,6 +667,20 @@ fn continuous_spawn_seed_1337() {
     assert!(
         matches!(res.terminated_by, Termination::GoalComplete),
         "seed {seed} did not converge in {DEADLINE_SECS}s; terminated_by={:?}, score={}",
+        res.terminated_by,
+        res.score.value,
+    );
+    assert!(res.score.value >= 0.99);
+}
+
+/// Sanity-check: the Rapier debug overlay doesn't break continuous-spawn.
+#[test]
+fn continuous_spawn_seed_42_with_debug_overlay() {
+    let seed = 42_u64;
+    let res = run_continuous_spawn_with(seed, "continuous_spawn_seed_42_overlay", true);
+    assert!(
+        matches!(res.terminated_by, Termination::GoalComplete),
+        "seed {seed} (overlay on) did not converge; terminated_by={:?}, score={}",
         res.terminated_by,
         res.score.value,
     );

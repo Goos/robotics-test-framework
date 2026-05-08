@@ -420,8 +420,15 @@ fn serpentine_waypoints(
 // -- Runner --------------------------------------------------------------
 
 fn run_one_seed(seed: u64, rrd_name: &str) -> rtf_harness::RunResult {
+    run_one_seed_with(seed, rrd_name, /* debug_overlay */ false)
+}
+
+fn run_one_seed_with(seed: u64, rrd_name: &str, debug_overlay: bool) -> rtf_harness::RunResult {
     let _ = rrd_name; // used only when viz-rerun is on
     let mut world = build_search_world(seed);
+    if debug_overlay {
+        world.enable_debug_overlay(true);
+    }
     let ports = world.attach_standard_arm_ports();
     let ee_pose_rx = world.attach_ee_pose_sensor(RateHz::new(1000));
     // One torque receiver per joint.
@@ -455,6 +462,9 @@ fn run_one_seed(seed: u64, rrd_name: &str) -> rtf_harness::RunResult {
 
     #[cfg(feature = "viz-rerun")]
     {
+        if std::env::var("RTF_DEBUG_OVERLAY").as_deref() == Ok("1") {
+            world.enable_debug_overlay(true);
+        }
         match rtf_viz::maybe_recorder_for(rrd_name) {
             Some(rec) => run(world, controller, goal, cfg.with_recorder(rec)),
             None => run(world, controller, goal, cfg),
@@ -520,6 +530,20 @@ fn find_by_touch_seed_1337() {
     assert!(
         matches!(res.terminated_by, Termination::GoalComplete),
         "seed {seed} did not converge in 30s; terminated_by={:?}, score={}",
+        res.terminated_by,
+        res.score.value,
+    );
+    assert!(res.score.value >= 0.9);
+}
+
+/// Sanity-check: the Rapier debug overlay doesn't break find-by-touch.
+#[test]
+fn find_by_touch_seed_42_with_debug_overlay() {
+    let seed = 42_u64;
+    let res = run_one_seed_with(seed, "find_by_touch_seed_42_overlay", true);
+    assert!(
+        matches!(res.terminated_by, Termination::GoalComplete),
+        "seed {seed} (overlay on) did not converge; terminated_by={:?}, score={}",
         res.terminated_by,
         res.score.value,
     );

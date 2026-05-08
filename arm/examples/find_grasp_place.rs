@@ -372,8 +372,20 @@ fn serpentine_waypoints(
 // -- Runner --------------------------------------------------------------
 
 fn run_one_seed(seed: u64, rrd_name: &str) -> rtf_harness::RunResult {
+    run_one_seed_with(seed, rrd_name, /* debug_overlay */ false)
+}
+
+fn run_one_seed_with(
+    seed: u64,
+    rrd_name: &str,
+    #[cfg_attr(not(feature = "physics-rapier"), allow(unused_variables))] debug_overlay: bool,
+) -> rtf_harness::RunResult {
     let _ = rrd_name; // used only when viz-rerun is on
     let mut world = build_search_world(seed);
+    #[cfg(feature = "physics-rapier")]
+    if debug_overlay {
+        world.enable_debug_overlay(true);
+    }
     let ports = world.attach_standard_arm_ports();
     let ee_pose_rx = world.attach_ee_pose_sensor(RateHz::new(100));
     let pressure_rx = world.attach_pressure_sensor(RateHz::new(1000), 0.03);
@@ -402,6 +414,9 @@ fn run_one_seed(seed: u64, rrd_name: &str) -> rtf_harness::RunResult {
 
     #[cfg(feature = "viz-rerun")]
     {
+        if std::env::var("RTF_DEBUG_OVERLAY").as_deref() == Ok("1") {
+            world.enable_debug_overlay(true);
+        }
         match rtf_viz::maybe_recorder_for(rrd_name) {
             Some(rec) => run(world, controller, goal, cfg.with_recorder(rec)),
             None => run(world, controller, goal, cfg),
@@ -467,6 +482,23 @@ fn find_grasp_place_seed_1337() {
     assert!(
         matches!(res.terminated_by, Termination::GoalComplete),
         "seed {seed} did not converge in 30s; terminated_by={:?}, score={}",
+        res.terminated_by,
+        res.score.value,
+    );
+    assert!(res.score.value > 0.9);
+}
+
+/// Sanity-check that turning the Rapier debug overlay on doesn't break the
+/// scenario or panic. The overlay adds Line primitives to every snapshot,
+/// which materially changes per-tick work — this test asserts it's
+/// nonetheless cheap enough to still converge under the standard deadline.
+#[test]
+fn find_grasp_place_seed_42_with_debug_overlay() {
+    let seed = 42_u64;
+    let res = run_one_seed_with(seed, "find_grasp_place_seed_42_overlay", true);
+    assert!(
+        matches!(res.terminated_by, Termination::GoalComplete),
+        "seed {seed} (overlay on) did not converge; terminated_by={:?}, score={}",
         res.terminated_by,
         res.score.value,
     );

@@ -264,8 +264,15 @@ where
 // -- Runner --------------------------------------------------------------
 
 fn run_pick_place(rrd_name: &str) -> rtf_harness::RunResult {
+    run_pick_place_with(rrd_name, /* debug_overlay */ false)
+}
+
+fn run_pick_place_with(rrd_name: &str, debug_overlay: bool) -> rtf_harness::RunResult {
     let _ = rrd_name; // used only when viz-rerun is on
     let mut world = build_pick_and_place_world();
+    if debug_overlay {
+        world.enable_debug_overlay(true);
+    }
     let ports = world.attach_standard_arm_ports();
     let ee_pose_rx = world.attach_ee_pose_sensor(RateHz::new(100));
     let block = block_id(&world);
@@ -290,6 +297,9 @@ fn run_pick_place(rrd_name: &str) -> rtf_harness::RunResult {
 
     #[cfg(feature = "viz-rerun")]
     {
+        if std::env::var("RTF_DEBUG_OVERLAY").as_deref() == Ok("1") {
+            world.enable_debug_overlay(true);
+        }
         match rtf_viz::maybe_recorder_for(rrd_name) {
             Some(rec) => run(world, controller, goal, cfg.with_recorder(rec)),
             None => run(world, controller, goal, cfg),
@@ -323,6 +333,19 @@ fn state_machine_picks_block_and_drops_in_bin() {
         "did not converge in 15s; final score={}, terminated_by={:?}",
         res.score.value,
         res.terminated_by,
+    );
+    assert!(res.score.value > 0.9);
+}
+
+/// Sanity-check: the Rapier debug overlay doesn't break pick-place.
+#[test]
+fn state_machine_picks_block_with_debug_overlay() {
+    let res = run_pick_place_with("state_machine_picks_block_overlay", true);
+    assert!(
+        matches!(res.terminated_by, Termination::GoalComplete),
+        "PickPlace (overlay on) did not converge; terminated_by={:?}, score={}",
+        res.terminated_by,
+        res.score.value,
     );
     assert!(res.score.value > 0.9);
 }

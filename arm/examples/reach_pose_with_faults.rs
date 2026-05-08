@@ -28,8 +28,15 @@ use rtf_harness::{run, RunConfig};
 use rtf_sim::faults::{Delay, GaussianNoise};
 
 fn run_reach_pose_with_faults(rrd_name: &str) -> rtf_harness::RunResult {
+    run_reach_pose_with_faults_with(rrd_name, /* debug_overlay */ false)
+}
+
+fn run_reach_pose_with_faults_with(rrd_name: &str, debug_overlay: bool) -> rtf_harness::RunResult {
     let _ = rrd_name; // used only when viz-rerun is on
     let mut world = build_simple_arm_world(3);
+    if debug_overlay {
+        world.enable_debug_overlay(true);
+    }
     let raw_clock = world.sim_clock_handle();
     let clock_dyn: Rc<dyn Clock> = raw_clock.clone();
 
@@ -64,6 +71,9 @@ fn run_reach_pose_with_faults(rrd_name: &str) -> rtf_harness::RunResult {
 
     #[cfg(feature = "viz-rerun")]
     {
+        if std::env::var("RTF_DEBUG_OVERLAY").as_deref() == Ok("1") {
+            world.enable_debug_overlay(true);
+        }
         match rtf_viz::maybe_recorder_for(rrd_name) {
             Some(rec) => run(world, controller, goal, cfg.with_recorder(rec)),
             None => run(world, controller, goal, cfg),
@@ -100,5 +110,17 @@ fn pd_still_reaches_target_with_2ms_encoder_delay_and_noise() {
         "did not converge under faults; final score={}, terminated_by={:?}",
         res.score.value,
         res.terminated_by,
+    );
+}
+
+/// Sanity-check: the Rapier debug overlay doesn't break ReachPose+faults.
+#[test]
+fn pd_reaches_target_with_faults_and_debug_overlay() {
+    let res = run_reach_pose_with_faults_with("pd_reaches_target_with_faults_overlay", true);
+    assert!(
+        matches!(res.terminated_by, Termination::GoalComplete),
+        "ReachPose+faults (overlay on) did not converge; terminated_by={:?}, score={}",
+        res.terminated_by,
+        res.score.value,
     );
 }
