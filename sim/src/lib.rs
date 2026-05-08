@@ -5,6 +5,7 @@ pub mod faults;
 pub mod fixture;
 pub mod gravity;
 pub mod object;
+pub mod physics;
 pub mod primitive;
 pub mod rate_scheduler;
 pub mod recorder;

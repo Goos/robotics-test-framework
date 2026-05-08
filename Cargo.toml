@@ -12,6 +12,11 @@ rand = { version = "0.8", default-features = false }
 rand_pcg = "0.3"
 rand_distr = { version = "0.4", default-features = false }
 rerun = { version = "0.21", default-features = false, features = ["sdk"] }
+# rapier3d 0.21 — pinned to align with nalgebra 0.33. Default features
+# (`dim3`, `f32`) are required for the crate to compile; `serde-serialize`
+# enables Bincode-friendly state. `parallel` is intentionally OFF — the
+# rayon-driven steps are non-deterministic per design v2 §10.
+rapier3d = { version = "0.21", features = ["serde-serialize"] }
 
 [workspace.lints.clippy]
 disallowed_types = "deny"

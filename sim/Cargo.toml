@@ -9,11 +9,16 @@ nalgebra.workspace = true
 rand.workspace = true
 rand_pcg.workspace = true
 rand_distr.workspace = true
+rapier3d = { workspace = true, optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 
 [features]
 default = []
 controller_events = []
+# Enable Rapier-backed dynamics + arm-vs-object contact + joint torque sensor
+# (rapier-integration plan, Phase 1). Default off through Phase 1; flipped on
+# in Step 1.13 once the kinematic gravity_step path is removed.
+physics-rapier = ["dep:rapier3d"]
 serde = ["dep:serde", "rtf_core/serde", "nalgebra/serde-serialize"]
 
 [lints]
