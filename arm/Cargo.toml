@@ -54,5 +54,9 @@ required-features = ["examples"]
 name = "find_by_touch"
 required-features = ["examples"]
 
+[[example]]
+name = "grasp_robustness"
+required-features = ["examples"]
+
 [lints]
 workspace = true
