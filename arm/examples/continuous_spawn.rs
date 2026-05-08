@@ -196,9 +196,8 @@ where
             .iter()
             .map(|&(x, y)| {
                 let r = (x * x + y * y).sqrt();
-                let (j1, j2, j3) =
-                    ik_3r(r, scan_z - arm_shoulder_z, SCAN_WRIST_PITCH, l1, l2, l3)
-                        .expect("scan waypoint unreachable — check region vs arm reach");
+                let (j1, j2, j3) = ik_3r(r, scan_z - arm_shoulder_z, SCAN_WRIST_PITCH, l1, l2, l3)
+                    .expect("scan waypoint unreachable — check region vs arm reach");
                 let yaw = y.atan2(x);
                 (yaw, j1, j2, j3)
             })
@@ -346,10 +345,7 @@ where
     /// radially inward and up by APPROACH_DZ in scan pose. Mirrors
     /// find_grasp_place.
     fn retracted_scan_target(&self, contact_xy: (f32, f32)) -> (f32, f32, f32, f32) {
-        let retracted_xy = (
-            contact_xy.0 * RETRACT_FACTOR,
-            contact_xy.1 * RETRACT_FACTOR,
-        );
+        let retracted_xy = (contact_xy.0 * RETRACT_FACTOR, contact_xy.1 * RETRACT_FACTOR);
         self.ik_target_with_pitch(retracted_xy, self.scan_z + APPROACH_DZ, SCAN_WRIST_PITCH)
     }
 
@@ -486,7 +482,9 @@ where
                 }
             }
             CSState::LiftAndRetract => {
-                let cxy = self.contact_xy.expect("contact_xy set on LocalizeFineSweep exit");
+                let cxy = self
+                    .contact_xy
+                    .expect("contact_xy set on LocalizeFineSweep exit");
                 let target = self.retracted_scan_target(cxy);
                 self.drive_joints_toward(target);
                 if self.joints_converged_to(target) {
@@ -494,7 +492,9 @@ where
                 }
             }
             CSState::RotateWristForGrasp => {
-                let cxy = self.contact_xy.expect("contact_xy set on LocalizeFineSweep exit");
+                let cxy = self
+                    .contact_xy
+                    .expect("contact_xy set on LocalizeFineSweep exit");
                 let scan_target = self.retracted_scan_target(cxy);
                 let target = (
                     scan_target.0,
@@ -504,14 +504,14 @@ where
                 );
                 self.drive_joints_toward(target);
                 self.rotate_wrist_n += 1;
-                if self.rotate_wrist_n >= ROTATE_WRIST_TICKS
-                    && self.joints_converged_to(target)
-                {
+                if self.rotate_wrist_n >= ROTATE_WRIST_TICKS && self.joints_converged_to(target) {
                     self.state = CSState::ApproachOverContact;
                 }
             }
             CSState::ApproachOverContact => {
-                let cxy = self.contact_xy.expect("contact_xy set on LocalizeFineSweep exit");
+                let cxy = self
+                    .contact_xy
+                    .expect("contact_xy set on LocalizeFineSweep exit");
                 let target = self.ik_target_for(cxy, self.scan_z + APPROACH_DZ);
                 self.drive_joints_toward(target);
                 if self.joints_converged_to(target) {
