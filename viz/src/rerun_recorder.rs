@@ -59,12 +59,22 @@ impl Recorder for RerunRecorder {
                 } => {
                     let center = [pose.translation.x, pose.translation.y, pose.translation.z];
                     let half_size = [half_extents.x, half_extents.y, half_extents.z];
+                    let q = pose.rotation;
+                    // PoseRotationQuat is a direct wrapper around
+                    // [x, y, z, w]. Boxes3D applies it as the box-local
+                    // rotation, so the rendered AABB matches the
+                    // Rapier-resolved orientation rather than always
+                    // axis-aligned.
+                    let quat = rerun::components::PoseRotationQuat(rerun::datatypes::Quaternion([
+                        q.i, q.j, q.k, q.w,
+                    ]));
                     let _ = self.stream.log(
                         path.as_str(),
                         &rerun::archetypes::Boxes3D::from_centers_and_half_sizes(
                             [center],
                             [half_size],
-                        ),
+                        )
+                        .with_quaternions([quat]),
                     );
                 }
                 Primitive::Capsule {
@@ -157,6 +167,29 @@ mod tests {
                 EntityId::Fixture(0),
                 Primitive::Box {
                     pose: Isometry3::identity(),
+                    half_extents: Vector3::new(0.05, 0.05, 0.05),
+                    color: Color::WHITE,
+                },
+            )],
+        });
+    }
+
+    #[test]
+    fn recorder_passes_rotation_to_rerun_box_archetype() {
+        // Smoke test: log a Box with a non-identity rotation. We can't
+        // round-trip parse the .rrd here without pulling in extra
+        // crates, but the lack of panic + clean shutdown verifies the
+        // PoseRotationQuat/Quaternion construction round-trips through
+        // the rerun archetype.
+        use nalgebra::{UnitQuaternion, Vector3};
+        let mut rec = RerunRecorder::in_memory("test").unwrap();
+        let rot = UnitQuaternion::from_axis_angle(&Vector3::z_axis(), 0.5);
+        rec.record(&SceneSnapshot {
+            t: Time::from_nanos(0),
+            items: vec![(
+                EntityId::Object(1),
+                Primitive::Box {
+                    pose: Isometry3::from_parts(nalgebra::Translation3::new(0.0, 0.0, 0.0), rot),
                     half_extents: Vector3::new(0.05, 0.05, 0.05),
                     color: Color::WHITE,
                 },
