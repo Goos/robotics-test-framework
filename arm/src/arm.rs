@@ -63,14 +63,36 @@ impl Arm {
 
 pub const LINK_RADIUS: f32 = 0.02;
 /// Half-extents of each finger pillar (small thin box, 4 cm long along EE +z).
-const FINGER_HALF_EXTENTS: Vector3<f32> = Vector3::new(0.01, 0.01, 0.04);
+pub const FINGER_HALF_EXTENTS: Vector3<f32> = Vector3::new(0.01, 0.01, 0.04);
 /// Lateral separation of finger centers along EE +y when the gripper is open.
-const FINGER_OPEN_SEPARATION: f32 = 0.04;
+pub const FINGER_OPEN_SEPARATION: f32 = 0.04;
 /// Lateral separation of finger centers along EE +y when the gripper is closed.
-const FINGER_CLOSED_SEPARATION: f32 = 0.012;
+pub const FINGER_CLOSED_SEPARATION: f32 = 0.012;
 /// Forward offset of the fingers along EE +z so they protrude past the EE
 /// origin (matches `FINGER_HALF_EXTENTS.z` so fingers extend from EE surface).
-const FINGER_FORWARD_OFFSET: f32 = 0.04;
+pub const FINGER_FORWARD_OFFSET: f32 = 0.04;
+/// Slot ids assigned to the two finger primitives within `EntityId::Arm`.
+/// 998/999 are kept high so they don't collide with link slots (which are
+/// indexed 0..n_joints) and stay stable across rerun runs.
+pub const FINGER_SLOT_PLUS: u32 = 998;
+pub const FINGER_SLOT_MINUS: u32 = 999;
+
+/// Compute the world-space pose of one finger given the EE pose, finger
+/// slot (+y or -y side), and current lateral separation. Shared by the
+/// visualization (`append_primitives`) and the per-tick physics-pose
+/// update so both layers see exactly the same finger geometry.
+pub fn finger_pose(ee_pose: Isometry3<f32>, slot: u32, separation: f32) -> Isometry3<f32> {
+    let sign = if slot == FINGER_SLOT_PLUS {
+        1.0_f32
+    } else {
+        -1.0
+    };
+    ee_pose
+        * Isometry3::from_parts(
+            Translation3::new(0.0, sign * separation, FINGER_FORWARD_OFFSET),
+            UnitQuaternion::identity(),
+        )
+}
 
 impl Visualizable for Arm {
     fn append_primitives(&self, out: &mut Vec<(EntityId, Primitive)>) {
@@ -106,26 +128,18 @@ impl Visualizable for Arm {
             acc *= link_offset;
         }
         // Articulated gripper: two finger pillars whose lateral separation
-        // is the visual proxy for the gripper open/close state. Both fingers
-        // protrude forward of the EE origin along its local +z.
-        let separation = if self.state.gripper_closed {
-            FINGER_CLOSED_SEPARATION
-        } else {
-            FINGER_OPEN_SEPARATION
-        };
-        for (slot, sign) in [(998, 1.0_f32), (999, -1.0_f32)] {
-            let finger_pose = acc
-                * Isometry3::from_parts(
-                    Translation3::new(0.0, sign * separation, FINGER_FORWARD_OFFSET),
-                    UnitQuaternion::identity(),
-                );
+        // is the live `gripper_separation` (0.012 closed → 0.04 open after
+        // Phase 3.2). Both fingers protrude forward of the EE origin along
+        // its local +z.
+        let separation = self.state.gripper_separation;
+        for slot in [FINGER_SLOT_PLUS, FINGER_SLOT_MINUS] {
             out.push((
                 EntityId::Arm {
                     arm_id: self.id,
                     slot,
                 },
                 Primitive::Box {
-                    pose: finger_pose,
+                    pose: finger_pose(acc, slot, separation),
                     half_extents: FINGER_HALF_EXTENTS,
                     color: Color::RED,
                 },

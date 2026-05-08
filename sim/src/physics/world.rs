@@ -89,6 +89,10 @@ pub struct PhysicsWorld {
     /// Domain↔Rapier mapping for arm-link kinematic capsule colliders,
     /// keyed by `(arm_id, link_slot)`.
     arm_link_bodies: BTreeMap<(u32, u32), RigidBodyHandle>,
+    /// Domain↔Rapier mapping for arm-finger kinematic cuboid colliders,
+    /// keyed by `(arm_id, finger_slot)` (finger_slot is the per-arm
+    /// FINGER_SLOT_PLUS/MINUS = 998/999 from `arm::arm`). Phase 3.1.
+    arm_finger_bodies: BTreeMap<(u32, u32), RigidBodyHandle>,
 }
 
 impl PhysicsWorld {
@@ -119,6 +123,7 @@ impl PhysicsWorld {
             object_bodies: BTreeMap::new(),
             fixture_bodies: BTreeMap::new(),
             arm_link_bodies: BTreeMap::new(),
+            arm_finger_bodies: BTreeMap::new(),
         }
     }
 
@@ -214,6 +219,48 @@ impl PhysicsWorld {
         handle
     }
 
+    /// Insert a kinematic-position-based body for a single arm finger
+    /// (cuboid collider matching the visualization's pillar shape). Pose
+    /// is updated each tick from `set_finger_pose`. Friction is set to
+    /// 1.0 (vs the global 2.0 on links/objects/fixtures) so the
+    /// Phase 3.4 friction-grasp can grip cleanly without the contact
+    /// solver locking up.
+    ///
+    /// `is_sensor` controls whether the finger collider applies physical
+    /// contact response. Phase 3.1 inserts fingers as sensors so the
+    /// existing Phase 1 kinematic-weld grasp still works (fingers register
+    /// contacts via the narrow phase but don't push the held object away
+    /// or collide with the table during sweep). Phase 3.4 will switch
+    /// fingers to non-sensor (physical) and remove the kinematic-weld so
+    /// the held object is pinched between the two fingers by friction.
+    pub fn insert_finger(
+        &mut self,
+        arm_id: u32,
+        slot: u32,
+        pose: Isometry3<f32>,
+        half_extents: nalgebra::Vector3<f32>,
+        is_sensor: bool,
+    ) -> RigidBodyHandle {
+        let body = RigidBodyBuilder::kinematic_position_based()
+            .position(pose)
+            .build();
+        let handle = self.rigid_body_set.insert(body);
+        let collider = ColliderBuilder::cuboid(half_extents.x, half_extents.y, half_extents.z)
+            .friction(1.0)
+            .sensor(is_sensor)
+            .build();
+        self.collider_set
+            .insert_with_parent(collider, handle, &mut self.rigid_body_set);
+        self.arm_finger_bodies.insert((arm_id, slot), handle);
+        handle
+    }
+
+    /// Lookup the Rapier handle for a finger. Mirrors `object_handle`,
+    /// for tests that want to peek at finger body state.
+    pub fn finger_handle(&self, arm_id: u32, slot: u32) -> Option<RigidBodyHandle> {
+        self.arm_finger_bodies.get(&(arm_id, slot)).copied()
+    }
+
     /// Lookup the Rapier handle for an Object. Returns `None` if the
     /// object hasn't been inserted yet.
     pub fn object_handle(&self, id: ObjectId) -> Option<RigidBodyHandle> {
@@ -292,6 +339,19 @@ impl PhysicsWorld {
     /// Silently no-ops if the (arm_id, slot) wasn't inserted.
     pub fn set_arm_link_pose(&mut self, arm_id: u32, slot: u32, pose: Isometry3<f32>) {
         let Some(handle) = self.arm_link_bodies.get(&(arm_id, slot)).copied() else {
+            return;
+        };
+        if let Some(body) = self.rigid_body_set.get_mut(handle) {
+            body.set_next_kinematic_position(pose);
+        }
+    }
+
+    /// Update the kinematic-body pose for an arm finger. Called each tick
+    /// after the gripper-separation update so the finger colliders track
+    /// the current EE pose + separation. Silently no-ops if the
+    /// (arm_id, slot) wasn't inserted. Phase 3.1.
+    pub fn set_finger_pose(&mut self, arm_id: u32, slot: u32, pose: Isometry3<f32>) {
+        let Some(handle) = self.arm_finger_bodies.get(&(arm_id, slot)).copied() else {
             return;
         };
         if let Some(body) = self.rigid_body_set.get_mut(handle) {

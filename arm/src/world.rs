@@ -193,6 +193,26 @@ impl ArmWorld {
                     },
                 );
             }
+            // Phase 3.1: insert two finger kinematic-cuboid bodies. Pose
+            // is recomputed each tick from the (post-FK) EE pose +
+            // current gripper_separation.
+            {
+                let ee = crate::fk::forward_kinematics(&arm.spec, &arm.state.q);
+                for slot in [crate::arm::FINGER_SLOT_PLUS, crate::arm::FINGER_SLOT_MINUS] {
+                    let pose = crate::arm::finger_pose(ee, slot, arm.state.gripper_separation);
+                    // Step 3.1: insert as sensors so the Phase 1
+                    // kinematic-weld grasp keeps working (fingers
+                    // register contacts but don't push). Step 3.4
+                    // switches them to physical and removes the weld.
+                    pw.insert_finger(
+                        arm.id,
+                        slot,
+                        pose,
+                        crate::arm::FINGER_HALF_EXTENTS,
+                        /* is_sensor */ true,
+                    );
+                }
+            }
             pw
         };
 
@@ -470,6 +490,20 @@ impl ArmWorld {
                 self.physics
                     .set_arm_link_pose(self.arm.id, link.slot, link.pose);
             }
+            // Phase 3.1: refresh finger poses too. Use the current EE
+            // pose (post-FK) and current gripper_separation so the
+            // finger colliders stay welded to the EE every tick.
+            {
+                let ee = self.ee_pose();
+                let sep = self.arm.state.gripper_separation;
+                for slot in [crate::arm::FINGER_SLOT_PLUS, crate::arm::FINGER_SLOT_MINUS] {
+                    self.physics.set_finger_pose(
+                        self.arm.id,
+                        slot,
+                        crate::arm::finger_pose(ee, slot, sep),
+                    );
+                }
+            }
             self.physics.step(dt_s);
             self.physics.sync_to_scene(&mut self.scene);
 
@@ -538,6 +572,15 @@ impl ArmWorld {
         let was_closed = self.arm.state.gripper_closed;
         let now_closed = cmd.close;
         self.arm.state.gripper_closed = now_closed;
+        // Phase 3.1: keep gripper_separation in lockstep with the boolean
+        // by snapping it on the close/open transition. Step 3.2 swaps the
+        // API for continuous target_separation and replaces this snap with
+        // a per-tick approach toward the target.
+        self.arm.state.gripper_separation = if now_closed {
+            crate::arm::FINGER_CLOSED_SEPARATION
+        } else {
+            crate::arm::FINGER_OPEN_SEPARATION
+        };
 
         // Opening transition: release any held object back to Free.
         if was_closed && !now_closed {
@@ -862,6 +905,58 @@ mod tests {
 
     #[cfg(feature = "physics-rapier")]
     #[test]
+    fn fingers_have_kinematic_bodies() {
+        // Both fingers should be inserted at construction with non-None
+        // physics handles.
+        use rtf_sim::physics::world::RigidBodyType;
+        let world = ArmWorld::new(Scene::new(0), simple_spec(), true);
+        for slot in [crate::arm::FINGER_SLOT_PLUS, crate::arm::FINGER_SLOT_MINUS] {
+            let h = world
+                .physics()
+                .finger_handle(world.arm.id, slot)
+                .unwrap_or_else(|| panic!("expected finger body for slot {slot}"));
+            assert_eq!(
+                world.physics().body_type(h),
+                Some(RigidBodyType::KinematicPositionBased),
+                "finger slot {slot} should be KinematicPositionBased"
+            );
+        }
+    }
+
+    #[cfg(feature = "physics-rapier")]
+    #[test]
+    fn finger_pose_tracks_ee_with_separation() {
+        // After one tick, both finger bodies should be at the EE-derived
+        // pose for the current gripper_separation. Closing the gripper
+        // (snap to 0.012 in Step 3.1's apply_gripper_command) should
+        // move the finger bodies inward (lower |y| relative to EE).
+        let mut world = ArmWorld::new(Scene::new(0), simple_spec(), true);
+        let g_tx = world.attach_gripper_actuator();
+
+        // First, drive one tick with the gripper open (default state) so
+        // the kinematic interpolation lands on the open pose.
+        world.consume_actuators_and_integrate_inner(Duration::from_millis(1));
+        let h_plus = world
+            .physics()
+            .finger_handle(world.arm.id, crate::arm::FINGER_SLOT_PLUS)
+            .expect("finger body");
+        let pos_open = world.physics().body_position(h_plus).unwrap();
+        let y_open = pos_open.translation.y.abs();
+
+        // Then close the gripper, drive a tick, assert the +y finger has
+        // moved inward (smaller |y|).
+        g_tx.send(GripperCommand { close: true });
+        world.consume_actuators_and_integrate_inner(Duration::from_millis(1));
+        let pos_closed = world.physics().body_position(h_plus).unwrap();
+        let y_closed = pos_closed.translation.y.abs();
+        assert!(
+            y_closed < y_open,
+            "expected closed finger inward of open: y_open={y_open}, y_closed={y_closed}"
+        );
+    }
+
+    #[cfg(feature = "physics-rapier")]
+    #[test]
     fn snapshot_excludes_debug_overlay_when_disabled() {
         use rtf_sim::primitive::Primitive;
         let world = ArmWorld::new(Scene::new(0), simple_spec(), true);
@@ -908,13 +1003,14 @@ mod tests {
     #[cfg(feature = "physics-rapier")]
     #[test]
     fn armworld_with_physics_feature_owns_physics_world_with_all_bodies() {
-        // Empty scene + 2-joint simple_spec = 2 arm-link bodies, 0 fixtures,
-        // 0 objects → physics body_count == 2.
+        // Empty scene + 2-joint simple_spec = 2 arm-link bodies, 0
+        // fixtures, 0 objects, +2 finger bodies (Phase 3.1) →
+        // physics body_count == 4.
         let world = ArmWorld::new(Scene::new(0), simple_spec(), true);
         assert_eq!(
             world.physics().body_count(),
-            simple_spec().joints.len(),
-            "expected one physics body per arm link"
+            simple_spec().joints.len() + 2,
+            "expected one body per arm link plus 2 finger bodies"
         );
     }
 
@@ -1437,8 +1533,9 @@ mod tests {
         ));
 
         let world = ArmWorld::new(scene, simple_spec(), true);
-        // 1 fixture + 1 object + 2 arm-link bodies = 4 total.
-        assert_eq!(world.physics().body_count(), 4);
+        // 1 fixture + 1 object + 2 arm-link bodies + 2 finger bodies
+        // (Phase 3.1) = 6 total.
+        assert_eq!(world.physics().body_count(), 6);
     }
 
     #[test]
