@@ -50,5 +50,9 @@ required-features = ["examples"]
 name = "continuous_spawn"
 required-features = ["examples"]
 
+[[example]]
+name = "find_by_touch"
+required-features = ["examples", "physics-rapier"]
+
 [lints]
 workspace = true

@@ -221,7 +221,13 @@ pub fn build_search_world(seed: u64) -> ArmWorld {
             Isometry3::translation(0.4, 0.0, 0.0),
         ],
         gripper: GripperSpec {
-            proximity_threshold: 0.05,
+            // Wider than the pick-and-place threshold (0.05) so an arm-link-
+            // pushed block remains within grasp range when the EE descends
+            // at the touch-detected xy. Find-by-touch (joint torque) needs
+            // the slack to recover from several-cm post-contact drift; find-
+            // grasp-place (pressure) hits the block much closer to centre
+            // and the wider threshold doesn't change its behavior.
+            proximity_threshold: 0.10,
             max_grasp_size: 0.1,
         },
     };

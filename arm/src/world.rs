@@ -75,6 +75,17 @@ pub(crate) struct TorquePublisher {
     pub scheduler: RateScheduler,
 }
 
+/// Arm-link contact-point publisher: emits the impulse-weighted centroid of
+/// all link-vs-dynamic-body contacts each tick (None if no contact).
+/// Consumed in `publish_sensors_for_dt`'s contact branch, gated on
+/// `physics-rapier`.
+#[allow(dead_code)]
+#[cfg(feature = "physics-rapier")]
+pub(crate) struct ArmContactPublisher {
+    pub tx: PortTx<crate::ports::ArmContactReading>,
+    pub scheduler: RateScheduler,
+}
+
 /// Per-joint velocity-command receiver. Consumed in Step 3.11c.
 #[allow(dead_code)]
 pub(crate) struct JointVelocityConsumer {
@@ -120,6 +131,11 @@ pub struct ArmWorld {
     /// data only exists when Rapier is the engine.
     #[cfg(feature = "physics-rapier")]
     pub(crate) sensors_torque: BTreeMap<PortId, TorquePublisher>,
+    /// Filled by `attach_arm_contact_sensor`; drained in
+    /// `publish_sensors_for_dt`'s contact branch. Gated on
+    /// `physics-rapier`.
+    #[cfg(feature = "physics-rapier")]
+    pub(crate) sensors_arm_contact: BTreeMap<PortId, ArmContactPublisher>,
     /// Filled by `attach_joint_velocity_actuator` (Step 3.9); drained in Step 3.11c.
     pub(crate) actuators_joint_velocity: BTreeMap<PortId, JointVelocityConsumer>,
     /// Filled by `attach_gripper_actuator` (Step 3.10); drained in Step 3.11d.
@@ -186,6 +202,8 @@ impl ArmWorld {
             sensors_pressure: BTreeMap::new(),
             #[cfg(feature = "physics-rapier")]
             sensors_torque: BTreeMap::new(),
+            #[cfg(feature = "physics-rapier")]
+            sensors_arm_contact: BTreeMap::new(),
             actuators_joint_velocity: BTreeMap::new(),
             actuators_gripper: BTreeMap::new(),
             pending_spawns: VecDeque::new(),
@@ -310,6 +328,33 @@ impl ArmWorld {
             port_id,
             TorquePublisher {
                 joint,
+                tx,
+                scheduler: RateScheduler::new_hz(rate.0),
+            },
+        );
+        rx
+    }
+
+    /// Register an arm-link external-contact-point sensor publishing at
+    /// `rate` Hz. The reading carries the impulse-magnitude-weighted
+    /// centroid of all link-vs-dynamic-body contact points each tick, or
+    /// `None` if no link is in contact. Surfaces the same contact data the
+    /// torque sensor projects onto joint axes — useful when a controller
+    /// needs to know *where* a touch happened (find-by-touch).
+    ///
+    /// Only available with `feature = "physics-rapier"` because the
+    /// underlying contact data only exists when Rapier is the engine.
+    #[cfg(feature = "physics-rapier")]
+    pub fn attach_arm_contact_sensor(
+        &mut self,
+        rate: RateHz,
+    ) -> PortRx<crate::ports::ArmContactReading> {
+        let (tx, rx) = rtf_core::port::port::<crate::ports::ArmContactReading>();
+        let port_id = PortId(self.next_port_id);
+        self.next_port_id += 1;
+        self.sensors_arm_contact.insert(
+            port_id,
+            ArmContactPublisher {
                 tx,
                 scheduler: RateScheduler::new_hz(rate.0),
             },
@@ -595,44 +640,92 @@ impl ArmWorld {
             }
         }
 
-        // Joint-torque: project each contact-impulse moment onto the
-        // joint's rotation axis, summed over all link colliders distal
-        // to the joint (rapier-integration design §7.1). dt_s converts
-        // impulse → time-averaged force.
+        // Joint-torque + arm-contact: both consume the same contact-pair
+        // iteration. Compute the per-tick contact list once, then fan it out
+        // to torque (impulse projected onto joint axes) and arm-contact
+        // (impulse-weighted contact-point centroid).
         #[cfg(feature = "physics-rapier")]
         {
-            if !self.sensors_torque.is_empty() {
-                let dt_s = (dt_ns as f32) / 1.0e9_f32;
-                let dt_eff = if dt_s > 1e-9 { dt_s } else { 1e-3 };
-                let anchors_axes = crate::fk::joint_anchors_axes(&self.arm.spec, &self.arm.state.q);
+            let need_torque = !self.sensors_torque.is_empty();
+            let need_contact = !self.sensors_arm_contact.is_empty();
+            if need_torque || need_contact {
                 let contacts = self.physics.arm_link_external_contacts(self.arm.id);
-                let n_joints = self.arm.spec.joints.len() as u32;
-                for pubr in self.sensors_torque.values_mut() {
-                    if !pubr.scheduler.tick(dt_ns) {
-                        continue;
-                    }
-                    let i = pubr.joint.0;
-                    if (i as usize) >= anchors_axes.len() {
-                        continue;
-                    }
-                    let (anchor, axis) = anchors_axes[i as usize];
-                    let mut tau = 0.0_f32;
-                    for c in &contacts {
-                        // Only sum contacts on links *distal* to this
-                        // joint — slot >= i.
-                        if c.link_slot < i || c.link_slot >= n_joints {
+
+                if need_torque {
+                    let dt_s = (dt_ns as f32) / 1.0e9_f32;
+                    let dt_eff = if dt_s > 1e-9 { dt_s } else { 1e-3 };
+                    let anchors_axes =
+                        crate::fk::joint_anchors_axes(&self.arm.spec, &self.arm.state.q);
+                    let n_joints = self.arm.spec.joints.len() as u32;
+                    for pubr in self.sensors_torque.values_mut() {
+                        if !pubr.scheduler.tick(dt_ns) {
                             continue;
                         }
-                        let r = c.point_world - anchor;
-                        let force = c.impulse_world / dt_eff;
-                        let moment = r.cross(&force);
-                        tau += axis.dot(&moment);
+                        let i = pubr.joint.0;
+                        if (i as usize) >= anchors_axes.len() {
+                            continue;
+                        }
+                        let (anchor, axis) = anchors_axes[i as usize];
+                        let mut tau = 0.0_f32;
+                        for c in &contacts {
+                            if c.link_slot < i || c.link_slot >= n_joints {
+                                continue;
+                            }
+                            let r = c.point_world - anchor;
+                            let force = c.impulse_world / dt_eff;
+                            let moment = r.cross(&force);
+                            tau += axis.dot(&moment);
+                        }
+                        pubr.tx.send(JointTorqueReading {
+                            joint: pubr.joint,
+                            tau,
+                            sampled_at,
+                        });
                     }
-                    pubr.tx.send(JointTorqueReading {
-                        joint: pubr.joint,
-                        tau,
-                        sampled_at,
-                    });
+                }
+
+                if need_contact {
+                    // Impulse-weighted centroid of all link-vs-dynamic
+                    // contact points this tick + summed impulse (its
+                    // direction approximates the outward contact normal).
+                    // Empty contacts → both None.
+                    let (centroid, impulse_sum) = if contacts.is_empty() {
+                        (None, None)
+                    } else {
+                        let mut wsum = 0.0_f32;
+                        let mut acc = nalgebra::Vector3::<f32>::zeros();
+                        let mut impulse_acc = nalgebra::Vector3::<f32>::zeros();
+                        for c in &contacts {
+                            let w = c.impulse_world.norm();
+                            if w > 0.0 {
+                                acc += c.point_world.coords * w;
+                                wsum += w;
+                            }
+                            impulse_acc += c.impulse_world;
+                        }
+                        let centroid = if wsum > 0.0 {
+                            Some(nalgebra::Point3::from(acc / wsum))
+                        } else {
+                            let n = contacts.len() as f32;
+                            let mean: nalgebra::Vector3<f32> = contacts
+                                .iter()
+                                .map(|c| c.point_world.coords)
+                                .sum::<nalgebra::Vector3<f32>>()
+                                / n;
+                            Some(nalgebra::Point3::from(mean))
+                        };
+                        (centroid, Some(impulse_acc))
+                    };
+                    for pubr in self.sensors_arm_contact.values_mut() {
+                        if !pubr.scheduler.tick(dt_ns) {
+                            continue;
+                        }
+                        pubr.tx.send(crate::ports::ArmContactReading {
+                            point_world: centroid,
+                            impulse_world: impulse_sum,
+                            sampled_at,
+                        });
+                    }
                 }
             }
         }
@@ -894,6 +987,73 @@ mod tests {
             seen.len(),
             seen
         );
+    }
+
+    #[cfg(feature = "physics-rapier")]
+    #[test]
+    fn arm_contact_sensor_emits_none_in_free_motion() {
+        // No graspable objects in scene → link contacts can't happen.
+        let mut world = ArmWorld::new(Scene::new(0), simple_spec(), false);
+        let rx = world.attach_arm_contact_sensor(RateHz::new(1000));
+        for _ in 0..10 {
+            world.consume_actuators_and_integrate_inner(Duration::from_millis(1));
+            world.publish_sensors_for_dt(Duration::from_millis(1));
+        }
+        let r = rx.latest().expect("at least one reading published");
+        assert!(r.point_world.is_none(), "expected no contact point");
+        assert!(r.impulse_world.is_none(), "expected no impulse");
+    }
+
+    #[cfg(feature = "physics-rapier")]
+    #[test]
+    fn arm_contact_sensor_reports_point_and_impulse_on_collision() {
+        // Same setup as joint_torque_nonzero_when_link_contacts_object: a
+        // sphere placed inside the swept volume of joint 0 → the link
+        // collider hits it as the arm yaws. Sensor should report both
+        // the contact point (somewhere on the sphere surface) and a
+        // non-zero impulse vector pointing from the link into the sphere.
+        use nalgebra::Isometry3;
+        use rtf_sim::object::{Object, ObjectId};
+        use rtf_sim::shape::Shape;
+
+        let mut scene = Scene::new(0);
+        scene.insert_object(Object::new(
+            ObjectId(1),
+            Isometry3::translation(0.5, 0.05, 0.0),
+            Shape::Sphere { radius: 0.05 },
+            0.1,
+            true,
+        ));
+        let mut world = ArmWorld::new(scene, moving_ee_spec(), false);
+        let rx = world.attach_arm_contact_sensor(RateHz::new(1000));
+        let v_tx = world.attach_joint_velocity_actuator(JointId(0));
+        v_tx.send(JointVelocityCommand {
+            joint: JointId(0),
+            q_dot_target: 1.5,
+        });
+        let mut saw_contact = false;
+        for _ in 0..500 {
+            world.consume_actuators_and_integrate_inner(Duration::from_millis(1));
+            world.publish_sensors_for_dt(Duration::from_millis(1));
+            if let Some(r) = rx.latest() {
+                if let (Some(pt), Some(imp)) = (r.point_world, r.impulse_world) {
+                    saw_contact = true;
+                    assert!(
+                        imp.norm() > 0.0,
+                        "impulse should be non-zero on contact: {imp:?}"
+                    );
+                    // Point should land near the sphere (within sphere
+                    // radius + small slop) — exact value isn't critical.
+                    let to_sphere = (pt.coords - nalgebra::Vector3::new(0.5, 0.05, 0.0)).norm();
+                    assert!(
+                        to_sphere < 0.10,
+                        "contact point too far from sphere: {to_sphere}"
+                    );
+                    break;
+                }
+            }
+        }
+        assert!(saw_contact, "expected at least one contact point reading");
     }
 
     #[cfg(feature = "physics-rapier")]

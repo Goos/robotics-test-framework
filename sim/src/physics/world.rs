@@ -141,7 +141,10 @@ impl PhysicsWorld {
     pub fn insert_object(&mut self, obj: &Object) -> RigidBodyHandle {
         let body = RigidBodyBuilder::dynamic().position(obj.pose).build();
         let handle = self.rigid_body_set.insert(body);
-        let collider = shape_to_collider(&obj.shape).mass(obj.mass).build();
+        let collider = shape_to_collider(&obj.shape)
+            .mass(obj.mass)
+            .friction(2.0)
+            .build();
         self.collider_set
             .insert_with_parent(collider, handle, &mut self.rigid_body_set);
         self.object_bodies.insert(obj.id, handle);
@@ -154,7 +157,10 @@ impl PhysicsWorld {
     pub fn insert_fixture(&mut self, fix: &Fixture) -> RigidBodyHandle {
         let body = RigidBodyBuilder::fixed().position(fix.pose).build();
         let handle = self.rigid_body_set.insert(body);
-        let collider = shape_to_collider(&fix.shape).build();
+        // High friction (vs Rapier default 0.5) on fixtures keeps a
+        // dynamic block from sliding far after a transient arm-link
+        // push (matters for the find-by-touch sweep/grasp sequence).
+        let collider = shape_to_collider(&fix.shape).friction(2.0).build();
         self.collider_set
             .insert_with_parent(collider, handle, &mut self.rigid_body_set);
         self.fixture_bodies.insert(fix.id, handle);
@@ -175,7 +181,9 @@ impl PhysicsWorld {
             .position(pose)
             .build();
         let handle = self.rigid_body_set.insert(body);
-        let collider = ColliderBuilder::capsule_z(shape.half_height, shape.radius).build();
+        let collider = ColliderBuilder::capsule_z(shape.half_height, shape.radius)
+            .friction(2.0)
+            .build();
         self.collider_set
             .insert_with_parent(collider, handle, &mut self.rigid_body_set);
         self.arm_link_bodies.insert((arm_id, slot), handle);

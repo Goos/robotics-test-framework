@@ -94,6 +94,30 @@ impl SensorReading for JointTorqueReading {
     }
 }
 
+/// Latest single-arm-link external contact in world coordinates: the
+/// impulse-magnitude-weighted centroid of all link-vs-dynamic-body contact
+/// points in the most recent physics step, plus the sum of impulses (whose
+/// direction approximates the contact normal pointing into the contacted
+/// body). Both fields are `None` when no link is in contact this tick.
+/// Useful for controllers that need to know *where* a touch occurred
+/// (e.g. find-by-touch) rather than just whether a torque exists at a
+/// joint, and which side the touched body sits on relative to the link.
+///
+/// Only meaningful with the `physics-rapier` feature on (publishers always
+/// emit `None` otherwise).
+#[derive(Clone, Debug)]
+pub struct ArmContactReading {
+    pub point_world: Option<nalgebra::Point3<f32>>,
+    pub impulse_world: Option<nalgebra::Vector3<f32>>,
+    pub sampled_at: Time,
+}
+
+impl SensorReading for ArmContactReading {
+    fn sampled_at(&self) -> Time {
+        self.sampled_at
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
