@@ -17,7 +17,51 @@ pub struct Arm {
     pub id: u32,
 }
 
-const LINK_RADIUS: f32 = 0.02;
+/// Per-link FK output: world-frame midpoint pose of the link's capsule,
+/// plus its half-height. The capsule's local +Z points along the link
+/// direction (matches `Arm::append_primitives`'s rotation logic).
+///
+/// Used by the Rapier integration (Step 1.5+) to keep arm-link kinematic
+/// body poses synced with FK each tick.
+#[derive(Clone, Copy, Debug)]
+pub struct LinkPose {
+    pub slot: u32,
+    pub pose: Isometry3<f32>,
+    pub half_height: f32,
+}
+
+impl Arm {
+    /// Compute the per-link capsule midpoint pose + half-height for every
+    /// link in the kinematic chain. Used by the Rapier integration to
+    /// keep arm-link kinematic body poses synced with FK each tick (and
+    /// also by `Visualizable::append_primitives` for rendering).
+    pub fn link_poses(&self) -> Vec<LinkPose> {
+        let mut out = Vec::with_capacity(self.spec.joints.len());
+        let mut acc = Isometry3::identity();
+        for (i, joint) in self.spec.joints.iter().enumerate() {
+            acc *= joint_transform(joint, self.state.q[i]);
+            let link_offset = self.spec.link_offsets[i];
+            let link_vec = link_offset.translation.vector;
+            let half_height = (link_vec.norm() / 2.0).max(0.001);
+            let z_to_link = if link_vec.norm() > 0.0 {
+                UnitQuaternion::rotation_between(&Vector3::z(), &link_vec.normalize())
+                    .unwrap_or_else(UnitQuaternion::identity)
+            } else {
+                UnitQuaternion::identity()
+            };
+            let mid = acc * Isometry3::from_parts(Translation3::from(link_vec / 2.0), z_to_link);
+            out.push(LinkPose {
+                slot: i as u32,
+                pose: mid,
+                half_height,
+            });
+            acc *= link_offset;
+        }
+        out
+    }
+}
+
+pub const LINK_RADIUS: f32 = 0.02;
 /// Half-extents of each finger pillar (small thin box, 4 cm long along EE +z).
 const FINGER_HALF_EXTENTS: Vector3<f32> = Vector3::new(0.01, 0.01, 0.04);
 /// Lateral separation of finger centers along EE +y when the gripper is open.

@@ -12,6 +12,10 @@ examples = []
 # Integration tests under tests/. Currently just gates release_falls.rs via
 # `#![cfg(feature = "e2e")]`. Pulls in `examples` for test_helpers access.
 e2e = ["examples"]
+# Rapier-backed dynamics + arm-vs-object contact (rapier-integration plan,
+# Phase 1). Default off through Phase 1 — flips on in Step 1.13 once the
+# kinematic gravity_step path is removed.
+physics-rapier = ["rtf_sim/physics-rapier"]
 # Phase 8: rerun-backed example variants. Pulls in `e2e` plus the rerun
 # feature on rtf_viz so the pick_place example can plug a `RerunRecorder`
 # into the harness (via `--features viz-rerun`).

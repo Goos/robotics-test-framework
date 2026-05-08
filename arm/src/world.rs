@@ -112,18 +112,54 @@ pub struct ArmWorld {
     /// peek the front. Spawns are processed at the end of
     /// `consume_actuators_and_integrate_inner`, after sim_time advances.
     pending_spawns: VecDeque<PendingSpawn>,
+    /// Rapier-backed physics world (rapier-integration plan, Phase 1).
+    /// Populated at construction with bodies for every fixture, object,
+    /// and arm link in the scene. Stepped each tick once Step 1.6 wires
+    /// up the tick loop; for now (Step 1.5) the field exists but isn't
+    /// driven, so behavior is unchanged.
+    #[cfg(feature = "physics-rapier")]
+    physics: rtf_sim::physics::PhysicsWorld,
 }
 
 impl ArmWorld {
     pub fn new(scene: Scene, spec: ArmSpec, gravity_enabled: bool) -> Self {
         let n = spec.joints.len();
+        let arm = Arm {
+            spec,
+            state: ArmState::zeros(n),
+            id: 0,
+        };
+
+        // Construct + populate the Rapier physics world. With the
+        // `physics-rapier` feature off, this entire block is gated out
+        // and behavior is unchanged.
+        #[cfg(feature = "physics-rapier")]
+        let physics = {
+            use rtf_sim::physics::world::ArmLinkShape;
+            let mut pw = rtf_sim::physics::PhysicsWorld::new(gravity_enabled);
+            for (_, fix) in scene.fixtures() {
+                pw.insert_fixture(fix);
+            }
+            for (_, obj) in scene.objects() {
+                pw.insert_object(obj);
+            }
+            for link in arm.link_poses() {
+                pw.insert_arm_link(
+                    arm.id,
+                    link.slot,
+                    link.pose,
+                    ArmLinkShape {
+                        radius: crate::arm::LINK_RADIUS,
+                        half_height: link.half_height,
+                    },
+                );
+            }
+            pw
+        };
+
         Self {
             scene,
-            arm: Arm {
-                spec,
-                state: ArmState::zeros(n),
-                id: 0,
-            },
+            arm,
             gravity_enabled,
             sim_time: Time::ZERO,
             last_publish_time: Time::ZERO,
@@ -135,7 +171,17 @@ impl ArmWorld {
             actuators_joint_velocity: BTreeMap::new(),
             actuators_gripper: BTreeMap::new(),
             pending_spawns: VecDeque::new(),
+            #[cfg(feature = "physics-rapier")]
+            physics,
         }
+    }
+
+    /// Read-only accessor for the Rapier physics world. Used by tests
+    /// that want to verify body insertion / count; controllers don't
+    /// need this and shouldn't reach for Rapier directly.
+    #[cfg(feature = "physics-rapier")]
+    pub fn physics(&self) -> &rtf_sim::physics::PhysicsWorld {
+        &self.physics
     }
 
     pub fn time(&self) -> Time {
@@ -547,6 +593,49 @@ mod tests {
         assert_eq!(world.time(), rtf_core::time::Time::ZERO);
     }
 
+    #[cfg(feature = "physics-rapier")]
+    #[test]
+    fn armworld_with_physics_feature_owns_physics_world_with_all_bodies() {
+        // Empty scene + 2-joint simple_spec = 2 arm-link bodies, 0 fixtures,
+        // 0 objects → physics body_count == 2.
+        let world = ArmWorld::new(Scene::new(0), simple_spec(), true);
+        assert_eq!(
+            world.physics().body_count(),
+            simple_spec().joints.len(),
+            "expected one physics body per arm link"
+        );
+    }
+
+    #[cfg(feature = "physics-rapier")]
+    #[test]
+    fn armworld_physics_includes_inserted_fixtures_and_objects() {
+        use nalgebra::{Isometry3, Vector3};
+        use rtf_sim::fixture::Fixture;
+        use rtf_sim::object::{Object, ObjectId};
+        use rtf_sim::shape::Shape;
+
+        let mut scene = Scene::new(0);
+        scene.add_fixture(Fixture {
+            id: 0,
+            pose: Isometry3::translation(0.0, 0.0, 0.0),
+            shape: Shape::Aabb {
+                half_extents: Vector3::new(1.0, 1.0, 0.05),
+            },
+            is_support: true,
+        });
+        scene.insert_object(Object::new(
+            ObjectId(1),
+            Isometry3::translation(0.0, 0.0, 0.5),
+            Shape::Sphere { radius: 0.05 },
+            0.1,
+            true,
+        ));
+
+        let world = ArmWorld::new(scene, simple_spec(), true);
+        // 1 fixture + 1 object + 2 arm-link bodies = 4 total.
+        assert_eq!(world.physics().body_count(), 4);
+    }
+
     #[test]
     fn sim_clock_handle_returns_sharable_rc() {
         use std::rc::Rc;
@@ -925,8 +1014,7 @@ mod tests {
             world.schedule_spawn(Time::from_millis(1), block_template());
         }
         world.consume_actuators_and_integrate_inner(Duration::from_millis(2));
-        let ids: std::collections::BTreeSet<_> =
-            world.scene.objects().map(|(id, _)| *id).collect();
+        let ids: std::collections::BTreeSet<_> = world.scene.objects().map(|(id, _)| *id).collect();
         assert_eq!(ids.len(), 3, "expected 3 distinct ids, got {ids:?}");
     }
 
