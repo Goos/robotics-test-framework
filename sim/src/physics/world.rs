@@ -247,6 +247,19 @@ impl PhysicsWorld {
             }
         }
     }
+
+    /// Update the kinematic-body pose for an arm link. Called each tick
+    /// from `ArmWorld::consume_actuators_and_integrate_inner` after the
+    /// joint integration step, so the link colliders track FK exactly.
+    /// Silently no-ops if the (arm_id, slot) wasn't inserted.
+    pub fn set_arm_link_pose(&mut self, arm_id: u32, slot: u32, pose: Isometry3<f32>) {
+        let Some(handle) = self.arm_link_bodies.get(&(arm_id, slot)).copied() else {
+            return;
+        };
+        if let Some(body) = self.rigid_body_set.get_mut(handle) {
+            body.set_next_kinematic_position(pose);
+        }
+    }
 }
 
 #[cfg(test)]

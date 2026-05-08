@@ -315,8 +315,11 @@ impl ArmWorld {
     /// Named `_inner` so the `RunnableWorld::consume_actuators_and_integrate`
     /// trait method can delegate here without recursing into itself.
     pub fn consume_actuators_and_integrate_inner(&mut self, dt: Duration) {
-        // Gravity (design v2 §5.5) — re-classify any settled object whose
-        // support has vanished, then integrate Free objects.
+        // Kinematic-only gravity path (design v2 §5.5) — preserved behind
+        // the `not(physics-rapier)` cfg so the default build keeps
+        // working through Phase 1 of the Rapier integration. Step 1.13
+        // removes this branch entirely once Rapier is the only path.
+        #[cfg(not(feature = "physics-rapier"))]
         if self.gravity_enabled {
             rtf_sim::gravity::reevaluate_settled(&mut self.scene);
             rtf_sim::gravity::gravity_step(&mut self.scene, dt.as_nanos());
@@ -352,6 +355,20 @@ impl ArmWorld {
 
         if let Some(cmd) = gripper_cmd {
             self.apply_gripper_command(cmd);
+        }
+
+        // Rapier physics step (rapier-integration plan, Step 1.6).
+        // Per design §4: update arm-link kinematic body poses from FK,
+        // step the pipeline, then sync the resolved Object poses back
+        // into the domain Scene.
+        #[cfg(feature = "physics-rapier")]
+        {
+            for link in self.arm.link_poses() {
+                self.physics
+                    .set_arm_link_pose(self.arm.id, link.slot, link.pose);
+            }
+            self.physics.step(dt_s);
+            self.physics.sync_to_scene(&mut self.scene);
         }
 
         // Grasped object is welded to the EE — refresh its pose from the
@@ -604,6 +621,76 @@ mod tests {
             simple_spec().joints.len(),
             "expected one physics body per arm link"
         );
+    }
+
+    #[cfg(feature = "physics-rapier")]
+    #[test]
+    fn armworld_step_keeps_settled_object_on_table() {
+        // build_pick_and_place_world has the block pre-Settled on a
+        // table fixture. After 100 ms of stepping, the block should
+        // remain near its starting xy/z (small jitter is fine).
+        use crate::test_helpers::{build_pick_and_place_world, BLOCK_OBJECT_ID};
+        let mut world = build_pick_and_place_world();
+        let pose0 = world.scene.object(BLOCK_OBJECT_ID).unwrap().pose;
+        for _ in 0..100 {
+            world.consume_actuators_and_integrate_inner(Duration::from_millis(1));
+        }
+        let pose1 = world.scene.object(BLOCK_OBJECT_ID).unwrap().pose;
+        let drift = (pose1.translation.vector - pose0.translation.vector).norm();
+        assert!(
+            drift < 0.02,
+            "block drifted {drift:.4} m in 100 ms (expected < 0.02)"
+        );
+    }
+
+    #[cfg(feature = "physics-rapier")]
+    #[test]
+    fn armworld_step_pushes_object_when_arm_collides() {
+        // Place a small free Sphere directly in the path of an arm
+        // link's swept volume. With joint 0 rotating about z-axis, the
+        // arm-link capsules sweep an arc in xy. moving_ee_spec has two
+        // 0.5 m x-axis link offsets, so link 1's capsule midpoint is
+        // at (0.75, 0, 0) at q=0 with radius 0.02 m + capsule end caps.
+        // We place the sphere at (0.5, 0.05, 0) so that as joint 0
+        // rotates from 0 toward +1 rad, link 0's collider sweeps right
+        // through it.
+        use nalgebra::{Isometry3, Vector3};
+        use rtf_sim::object::{Object, ObjectId};
+        use rtf_sim::shape::Shape;
+
+        let mut scene = Scene::new(0);
+        let block = ObjectId(1);
+        scene.insert_object(Object::new(
+            block,
+            Isometry3::translation(0.5, 0.05, 0.0),
+            Shape::Sphere { radius: 0.05 },
+            0.1,
+            true,
+        ));
+        let mut world = ArmWorld::new(scene, moving_ee_spec(), /* gravity */ false);
+
+        let pose0 = world.scene.object(block).unwrap().pose;
+        let tx = world.attach_joint_velocity_actuator(JointId(0));
+        tx.send(JointVelocityCommand {
+            joint: JointId(0),
+            q_dot_target: 1.5,
+        });
+        // 500 ms at 1.5 rad/s → joint sweeps 0.75 rad, taking link 0
+        // through the sphere's xy.
+        for _ in 0..500 {
+            world.consume_actuators_and_integrate_inner(Duration::from_millis(1));
+        }
+        let pose1 = world.scene.object(block).unwrap().pose;
+        // Use squared distance via direct multiplication; project lint
+        // disallows `f32::powi` for cross-toolchain determinism.
+        let dx = pose1.translation.x - pose0.translation.x;
+        let dy = pose1.translation.y - pose0.translation.y;
+        let drift_xy = (dx * dx + dy * dy).sqrt();
+        assert!(
+            drift_xy > 0.01,
+            "expected the sweeping arm link to push the sphere; xy drift was {drift_xy:.4} m"
+        );
+        let _ = Vector3::<f32>::zeros(); // silence unused-import warning
     }
 
     #[cfg(feature = "physics-rapier")]
@@ -941,6 +1028,12 @@ mod tests {
         );
     }
 
+    /// Kinematic-gravity-fall settled detection: only meaningful in the
+    /// `not(physics-rapier)` path. With Rapier on, Settled-derivation
+    /// from velocity arrives in Step 1.7 — until then the test would
+    /// incorrectly observe `Free` (initial state) post-step. Step 1.13
+    /// retires this test entirely once the kinematic path is removed.
+    #[cfg(not(feature = "physics-rapier"))]
     #[test]
     fn arm_world_with_gravity_lets_object_fall_onto_table() {
         use nalgebra::{Isometry3, Vector3};
