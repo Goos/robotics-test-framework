@@ -76,6 +76,24 @@ impl SensorReading for PressureReading {
     }
 }
 
+/// Per-joint contact torque reading (rapier-integration design §7.1) — the
+/// scalar torque about the joint's rotation axis induced by external
+/// contacts on links distal to this joint. Zero in free motion; non-zero
+/// when downstream link colliders are in contact with dynamic Rapier
+/// bodies. Sign follows the joint's positive-rotation convention.
+#[derive(Clone, Debug)]
+pub struct JointTorqueReading {
+    pub joint: JointId,
+    pub tau: f32,
+    pub sampled_at: Time,
+}
+
+impl SensorReading for JointTorqueReading {
+    fn sampled_at(&self) -> Time {
+        self.sampled_at
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -297,6 +297,98 @@ impl PhysicsWorld {
             body.set_angvel(nalgebra::Vector3::zeros(), true);
         }
     }
+
+    /// Iterate every contact pair touching a link of arm `arm_id`.
+    /// Yields `(link_slot, contact_point_world, total_impulse_world)`
+    /// per pair so the caller can compute joint torques. The impulse
+    /// is signed from the perspective of the LINK collider — positive
+    /// along the contact normal pointing INTO the link.
+    ///
+    /// Used by `attach_joint_torque_sensor` (rapier-integration §7.1).
+    pub fn arm_link_external_contacts(&self, arm_id: u32) -> Vec<ContactInfo> {
+        let mut out = Vec::new();
+        for pair in self.narrow_phase.contact_pairs() {
+            // Determine which side (1 or 2) belongs to an arm link of
+            // this arm_id. Skip pairs where neither side does.
+            let (link_slot, link_collider, other_collider, link_is_first) = match (
+                self.arm_link_slot_for(arm_id, pair.collider1),
+                self.arm_link_slot_for(arm_id, pair.collider2),
+            ) {
+                (Some(s), _) => (s, pair.collider1, pair.collider2, true),
+                (None, Some(s)) => (s, pair.collider2, pair.collider1, false),
+                (None, None) => continue,
+            };
+            let _ = other_collider;
+            // Need the link collider's world pose to lift local_p1 /
+            // local_p2 into world frame.
+            let Some(link_col) = self.collider_set.get(link_collider) else {
+                continue;
+            };
+            let link_pose = link_col.position();
+            // Sum impulses across all manifold points on this pair.
+            for manifold in &pair.manifolds {
+                // Normal in world frame (manifold's local_n1 is in
+                // collider1's local frame).
+                let normal_world = if link_is_first {
+                    link_pose.rotation * manifold.local_n1
+                } else {
+                    // local_n1 always points from collider1 toward collider2.
+                    // From the LINK's perspective (it's collider2 here),
+                    // negate so positive impulse means "into the link".
+                    -(self
+                        .collider_set
+                        .get(pair.collider1)
+                        .map(|c| c.position().rotation * manifold.local_n1)
+                        .unwrap_or(manifold.local_n1))
+                };
+                for contact in &manifold.points {
+                    // Contact point in world frame: lift local_p (link
+                    // frame) by link_pose, or (other frame) by other.
+                    let local_p = if link_is_first {
+                        contact.local_p1
+                    } else {
+                        contact.local_p2
+                    };
+                    let point_world = link_pose * local_p;
+                    let impulse_scalar = contact.data.impulse;
+                    let impulse_world = normal_world * impulse_scalar;
+                    out.push(ContactInfo {
+                        link_slot,
+                        point_world,
+                        impulse_world,
+                    });
+                }
+            }
+        }
+        out
+    }
+
+    /// Return the link slot for `(arm_id, body)` if `collider` belongs
+    /// to one of arm `arm_id`'s links; `None` otherwise.
+    fn arm_link_slot_for(
+        &self,
+        arm_id: u32,
+        collider: rapier3d::geometry::ColliderHandle,
+    ) -> Option<u32> {
+        let body_handle = self.collider_set.get(collider)?.parent()?;
+        // Reverse-lookup the (arm_id, slot) by scanning the BTreeMap.
+        // BTreeMap scan is O(n) in the number of arm-link bodies, which
+        // is small (~3-5 per arm).
+        for ((aid, slot), h) in &self.arm_link_bodies {
+            if *aid == arm_id && *h == body_handle {
+                return Some(*slot);
+            }
+        }
+        None
+    }
+}
+
+/// Per-contact information surfaced by `arm_link_external_contacts`.
+#[derive(Clone, Debug)]
+pub struct ContactInfo {
+    pub link_slot: u32,
+    pub point_world: nalgebra::Point3<f32>,
+    pub impulse_world: nalgebra::Vector3<f32>,
 }
 
 #[cfg(test)]

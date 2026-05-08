@@ -11,8 +11,8 @@ use rtf_sim::sim_clock::SimClock;
 
 use crate::arm::Arm;
 use crate::ports::{
-    EePoseReading, GripperCommand, JointEncoderReading, JointId, JointVelocityCommand,
-    PressureReading,
+    EePoseReading, GripperCommand, JointEncoderReading, JointId, JointTorqueReading,
+    JointVelocityCommand, PressureReading,
 };
 use crate::spec::ArmSpec;
 use crate::state::ArmState;
@@ -65,6 +65,16 @@ pub(crate) struct PressurePublisher {
     pub eps: f32,
 }
 
+/// Per-joint contact torque publisher (rapier-integration design §7.1).
+/// Consumed in `publish_sensors_for_dt`'s torque branch, gated on
+/// `physics-rapier`.
+#[allow(dead_code)]
+pub(crate) struct TorquePublisher {
+    pub joint: JointId,
+    pub tx: PortTx<JointTorqueReading>,
+    pub scheduler: RateScheduler,
+}
+
 /// Per-joint velocity-command receiver. Consumed in Step 3.11c.
 #[allow(dead_code)]
 pub(crate) struct JointVelocityConsumer {
@@ -104,6 +114,12 @@ pub struct ArmWorld {
     /// Filled by `attach_pressure_sensor` (find-grasp-place design §2.3);
     /// drained in `publish_sensors_for_dt`.
     pub(crate) sensors_pressure: BTreeMap<PortId, PressurePublisher>,
+    /// Filled by `attach_joint_torque_sensor` (rapier-integration design
+    /// §7.1); drained in `publish_sensors_for_dt`'s torque branch.
+    /// Gated on `physics-rapier` since the underlying contact-impulse
+    /// data only exists when Rapier is the engine.
+    #[cfg(feature = "physics-rapier")]
+    pub(crate) sensors_torque: BTreeMap<PortId, TorquePublisher>,
     /// Filled by `attach_joint_velocity_actuator` (Step 3.9); drained in Step 3.11c.
     pub(crate) actuators_joint_velocity: BTreeMap<PortId, JointVelocityConsumer>,
     /// Filled by `attach_gripper_actuator` (Step 3.10); drained in Step 3.11d.
@@ -168,6 +184,8 @@ impl ArmWorld {
             sensors_joint_encoder: BTreeMap::new(),
             sensors_ee_pose: BTreeMap::new(),
             sensors_pressure: BTreeMap::new(),
+            #[cfg(feature = "physics-rapier")]
+            sensors_torque: BTreeMap::new(),
             actuators_joint_velocity: BTreeMap::new(),
             actuators_gripper: BTreeMap::new(),
             pending_spawns: VecDeque::new(),
@@ -270,6 +288,33 @@ impl ArmWorld {
         self.actuators_gripper
             .insert(port_id, GripperConsumer { rx });
         tx
+    }
+
+    /// Register a joint-torque sensor on `joint` publishing at `rate` Hz
+    /// (rapier-integration design §7.1). Returns the receiver end; the
+    /// world retains the sender + scheduler and computes per-joint
+    /// torque from contact impulses during `publish_sensors_for_dt`.
+    ///
+    /// Only available with `feature = "physics-rapier"` because torque
+    /// requires Rapier's contact-impulse data.
+    #[cfg(feature = "physics-rapier")]
+    pub fn attach_joint_torque_sensor(
+        &mut self,
+        joint: JointId,
+        rate: RateHz,
+    ) -> PortRx<JointTorqueReading> {
+        let (tx, rx) = rtf_core::port::port::<JointTorqueReading>();
+        let port_id = PortId(self.next_port_id);
+        self.next_port_id += 1;
+        self.sensors_torque.insert(
+            port_id,
+            TorquePublisher {
+                joint,
+                tx,
+                scheduler: RateScheduler::new_hz(rate.0),
+            },
+        );
+        rx
     }
 
     /// Register an EE-mounted pressure sensor publishing at `rate` Hz with
@@ -549,6 +594,48 @@ impl ArmWorld {
                 }
             }
         }
+
+        // Joint-torque: project each contact-impulse moment onto the
+        // joint's rotation axis, summed over all link colliders distal
+        // to the joint (rapier-integration design §7.1). dt_s converts
+        // impulse → time-averaged force.
+        #[cfg(feature = "physics-rapier")]
+        {
+            if !self.sensors_torque.is_empty() {
+                let dt_s = (dt_ns as f32) / 1.0e9_f32;
+                let dt_eff = if dt_s > 1e-9 { dt_s } else { 1e-3 };
+                let anchors_axes = crate::fk::joint_anchors_axes(&self.arm.spec, &self.arm.state.q);
+                let contacts = self.physics.arm_link_external_contacts(self.arm.id);
+                let n_joints = self.arm.spec.joints.len() as u32;
+                for pubr in self.sensors_torque.values_mut() {
+                    if !pubr.scheduler.tick(dt_ns) {
+                        continue;
+                    }
+                    let i = pubr.joint.0;
+                    if (i as usize) >= anchors_axes.len() {
+                        continue;
+                    }
+                    let (anchor, axis) = anchors_axes[i as usize];
+                    let mut tau = 0.0_f32;
+                    for c in &contacts {
+                        // Only sum contacts on links *distal* to this
+                        // joint — slot >= i.
+                        if c.link_slot < i || c.link_slot >= n_joints {
+                            continue;
+                        }
+                        let r = c.point_world - anchor;
+                        let force = c.impulse_world / dt_eff;
+                        let moment = r.cross(&force);
+                        tau += axis.dot(&moment);
+                    }
+                    pubr.tx.send(JointTorqueReading {
+                        joint: pubr.joint,
+                        tau,
+                        sampled_at,
+                    });
+                }
+            }
+        }
     }
 
     /// Look up a scene object by id. Convenience pass-through used by goal
@@ -661,6 +748,151 @@ mod tests {
             world.physics().body_count(),
             simple_spec().joints.len(),
             "expected one physics body per arm link"
+        );
+    }
+
+    #[cfg(feature = "physics-rapier")]
+    #[test]
+    fn joint_torque_zero_when_no_contact() {
+        // Empty scene + 2-joint simple_spec → no objects → no contacts →
+        // every joint reads tau ~ 0 even while the arm is moving.
+        let mut world = ArmWorld::new(Scene::new(0), simple_spec(), false);
+        let rx0 = world.attach_joint_torque_sensor(JointId(0), RateHz::new(1000));
+        let rx1 = world.attach_joint_torque_sensor(JointId(1), RateHz::new(1000));
+        let v_tx = world.attach_joint_velocity_actuator(JointId(0));
+        v_tx.send(JointVelocityCommand {
+            joint: JointId(0),
+            q_dot_target: 1.0,
+        });
+        for _ in 0..50 {
+            world.consume_actuators_and_integrate_inner(Duration::from_millis(1));
+            world.publish_sensors_for_dt(Duration::from_millis(1));
+        }
+        let r0 = rx0.latest().expect("torque published");
+        let r1 = rx1.latest().expect("torque published");
+        assert!(r0.tau.abs() < 1e-3, "expected ~0 torque, got {}", r0.tau);
+        assert!(r1.tau.abs() < 1e-3, "expected ~0 torque, got {}", r1.tau);
+    }
+
+    #[cfg(feature = "physics-rapier")]
+    #[test]
+    fn joint_torque_nonzero_when_link_contacts_object() {
+        // Place a fixed-but-collidable Object directly in the swept
+        // path of arm-link 0; drive joint-0; expect nonzero torque on
+        // joint 0 (link 0 is distal to joint 0).
+        use nalgebra::Isometry3;
+        use rtf_sim::object::{Object, ObjectId};
+        use rtf_sim::shape::Shape;
+
+        let mut scene = Scene::new(0);
+        scene.insert_object(Object::new(
+            ObjectId(1),
+            Isometry3::translation(0.5, 0.05, 0.0),
+            Shape::Sphere { radius: 0.05 },
+            0.1,
+            true,
+        ));
+        let mut world = ArmWorld::new(scene, moving_ee_spec(), /* gravity */ false);
+        let rx = world.attach_joint_torque_sensor(JointId(0), RateHz::new(1000));
+        let v_tx = world.attach_joint_velocity_actuator(JointId(0));
+        v_tx.send(JointVelocityCommand {
+            joint: JointId(0),
+            q_dot_target: 1.5,
+        });
+        // Drive into the sphere; collect peak torque magnitude over
+        // the run since the contact only lasts a few ticks.
+        let mut peak = 0.0_f32;
+        for _ in 0..500 {
+            world.consume_actuators_and_integrate_inner(Duration::from_millis(1));
+            world.publish_sensors_for_dt(Duration::from_millis(1));
+            if let Some(r) = rx.latest() {
+                if r.tau.abs() > peak {
+                    peak = r.tau.abs();
+                }
+            }
+        }
+        assert!(
+            peak > 0.01,
+            "expected nonzero peak torque from arm-link contact, got {peak}"
+        );
+    }
+
+    #[cfg(feature = "physics-rapier")]
+    #[test]
+    fn joint_torque_signed_per_axis_convention() {
+        // Same setup as the previous test, but drive joint 0 in the
+        // OPPOSITE direction. The signed peak torque should flip sign
+        // (push direction is reversed).
+        use nalgebra::Isometry3;
+        use rtf_sim::object::{Object, ObjectId};
+        use rtf_sim::shape::Shape;
+
+        let drive_run = |q_dot: f32| -> f32 {
+            let mut scene = Scene::new(0);
+            scene.insert_object(Object::new(
+                ObjectId(1),
+                Isometry3::translation(0.5, 0.05 * q_dot.signum(), 0.0),
+                Shape::Sphere { radius: 0.05 },
+                0.1,
+                true,
+            ));
+            let mut world = ArmWorld::new(scene, moving_ee_spec(), false);
+            let rx = world.attach_joint_torque_sensor(JointId(0), RateHz::new(1000));
+            let v_tx = world.attach_joint_velocity_actuator(JointId(0));
+            v_tx.send(JointVelocityCommand {
+                joint: JointId(0),
+                q_dot_target: q_dot,
+            });
+            // Track signed-extreme tau (the value with the largest
+            // magnitude, keeping its sign). Default to 0 if no contact
+            // is detected.
+            let mut signed_peak = 0.0_f32;
+            for _ in 0..500 {
+                world.consume_actuators_and_integrate_inner(Duration::from_millis(1));
+                world.publish_sensors_for_dt(Duration::from_millis(1));
+                if let Some(r) = rx.latest() {
+                    if r.tau.abs() > signed_peak.abs() {
+                        signed_peak = r.tau;
+                    }
+                }
+            }
+            signed_peak
+        };
+        let positive = drive_run(1.5);
+        let negative = drive_run(-1.5);
+        assert!(
+            positive.abs() > 0.005,
+            "positive run had no torque: {positive}"
+        );
+        assert!(
+            negative.abs() > 0.005,
+            "negative run had no torque: {negative}"
+        );
+        assert!(
+            positive.signum() != negative.signum(),
+            "expected sign flip; got positive={positive}, negative={negative}"
+        );
+    }
+
+    #[cfg(feature = "physics-rapier")]
+    #[test]
+    fn joint_torque_publishes_at_configured_rate() {
+        let mut world = ArmWorld::new(Scene::new(0), simple_spec(), false);
+        let rx = world.attach_joint_torque_sensor(JointId(0), RateHz::new(100));
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..50 {
+            world.consume_actuators_and_integrate_inner(Duration::from_millis(1));
+            world.publish_sensors_for_dt(Duration::from_millis(1));
+            if let Some(r) = rx.latest() {
+                seen.insert(r.sampled_at.as_nanos());
+            }
+        }
+        assert_eq!(
+            seen.len(),
+            5,
+            "expected 5 distinct publish times in 50ms at 100Hz, got {}: {:?}",
+            seen.len(),
+            seen
         );
     }
 

@@ -30,6 +30,34 @@ pub fn forward_kinematics(spec: &ArmSpec, q: &[f32]) -> Isometry3<f32> {
         })
 }
 
+/// World-frame `(anchor, axis)` for each joint in the kinematic chain.
+/// Used by the joint-torque sensor (rapier-integration §7.1) to project
+/// contact-impulse moments onto each joint's rotation axis.
+///
+/// The anchor for joint i is the world-frame translation at the chain
+/// position right before joint i's rotation is applied. The axis is
+/// the joint's local rotation axis (or translation axis for prismatic
+/// joints) rotated by the cumulative chain rotation up to that point.
+pub fn joint_anchors_axes(
+    spec: &ArmSpec,
+    q: &[f32],
+) -> Vec<(nalgebra::Point3<f32>, nalgebra::Vector3<f32>)> {
+    let mut out = Vec::with_capacity(spec.joints.len());
+    let mut acc = Isometry3::identity();
+    for (i, joint) in spec.joints.iter().enumerate() {
+        let anchor = nalgebra::Point3::from(acc.translation.vector);
+        let local_axis = match joint {
+            JointSpec::Revolute { axis, .. } | JointSpec::Prismatic { axis, .. } => {
+                axis.into_inner()
+            }
+        };
+        let world_axis = acc.rotation * local_axis;
+        out.push((anchor, world_axis));
+        acc *= joint_transform(joint, q[i]) * spec.link_offsets[i];
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
