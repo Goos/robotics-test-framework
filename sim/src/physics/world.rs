@@ -204,6 +204,49 @@ impl PhysicsWorld {
         let collider = self.collider_set.get(collider_handle)?;
         collider.shape().as_cuboid().map(|c| c.half_extents)
     }
+
+    /// Step the physics pipeline forward by `dt` seconds. Updates `dt`
+    /// on the integration parameters first so callers can drive
+    /// variable-rate steps. After a step, callers typically call
+    /// `sync_to_scene` to write the new poses + velocities back into
+    /// the domain `Scene`.
+    pub fn step(&mut self, dt: f32) {
+        self.integration_parameters.dt = dt;
+        // rapier3d 0.21's `step()` takes 14 args incl. a query_pipeline
+        // (Option<&mut QueryPipeline>) and hooks/events trait objects.
+        // We pass None / unit-tuple no-ops since v1 doesn't query
+        // QueryPipeline and doesn't hook physics events.
+        self.physics_pipeline.step(
+            &self.gravity,
+            &self.integration_parameters,
+            &mut self.island_manager,
+            &mut self.broad_phase,
+            &mut self.narrow_phase,
+            &mut self.rigid_body_set,
+            &mut self.collider_set,
+            &mut self.impulse_joint_set,
+            &mut self.multibody_joint_set,
+            &mut self.ccd_solver,
+            None,
+            &(),
+            &(),
+        );
+    }
+
+    /// Write each Object's Rapier-resolved pose + linear velocity back
+    /// into the domain `Scene`. Called after `step()`. Idempotent if
+    /// nothing has stepped (re-syncs the same values).
+    pub fn sync_to_scene(&self, scene: &mut crate::scene::Scene) {
+        for (obj_id, body_handle) in &self.object_bodies {
+            let Some(body) = self.rigid_body_set.get(*body_handle) else {
+                continue;
+            };
+            if let Some(obj) = scene.object_mut(*obj_id) {
+                obj.pose = *body.position();
+                obj.lin_vel = *body.linvel();
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -308,5 +351,70 @@ mod tests {
         pw.insert_object(&obj);
         assert!(pw.object_handle(ObjectId(42)).is_some());
         assert!(pw.object_handle(ObjectId(999)).is_none());
+    }
+
+    #[test]
+    fn step_with_no_bodies_is_noop() {
+        let mut pw = PhysicsWorld::new(true);
+        for _ in 0..100 {
+            pw.step(0.001);
+        }
+        assert_eq!(pw.body_count(), 0);
+    }
+
+    #[test]
+    fn dynamic_object_falls_under_gravity_until_resting_on_fixture() {
+        // Sphere object at z=1.0, fixture box top at z=0.5. Step long
+        // enough for gravity to bring the sphere down + Rapier to
+        // resolve contact.
+        let mut pw = PhysicsWorld::new(true);
+        let mut scene = crate::scene::Scene::new(0);
+        // Fixture: large flat box, top at z=0.5.
+        let fix = Fixture {
+            id: 0,
+            pose: Isometry3::translation(0.0, 0.0, 0.45),
+            shape: Shape::Aabb {
+                half_extents: nalgebra::Vector3::new(2.0, 2.0, 0.05),
+            },
+            is_support: true,
+        };
+        scene.add_fixture(fix.clone());
+        pw.insert_fixture(&fix);
+        // Sphere object at z=1.0.
+        let obj = sphere_object(1, 0.0);
+        scene.insert_object(obj.clone());
+        pw.insert_object(&obj);
+
+        for _ in 0..2000 {
+            pw.step(0.001);
+        }
+        pw.sync_to_scene(&mut scene);
+
+        let final_z = scene.object(ObjectId(1)).unwrap().pose.translation.z;
+        // Top of fixture is z=0.5; sphere radius 0.05 ⇒ resting center
+        // at z≈0.55. Allow 5 mm slop for solver settling.
+        assert!(
+            (final_z - 0.55).abs() < 0.005,
+            "expected sphere to settle near z=0.55, got z={final_z}"
+        );
+    }
+
+    #[test]
+    fn sync_updates_lin_vel_when_object_is_falling() {
+        // No fixture — object free-falls under gravity. After a few
+        // steps, lin_vel.z should be negative.
+        let mut pw = PhysicsWorld::new(true);
+        let mut scene = crate::scene::Scene::new(0);
+        let obj = sphere_object(1, 0.0);
+        scene.insert_object(obj.clone());
+        pw.insert_object(&obj);
+
+        for _ in 0..50 {
+            pw.step(0.001);
+        }
+        pw.sync_to_scene(&mut scene);
+
+        let v = scene.object(ObjectId(1)).unwrap().lin_vel;
+        assert!(v.z < -0.1, "expected falling lin_vel.z < -0.1, got {}", v.z);
     }
 }
