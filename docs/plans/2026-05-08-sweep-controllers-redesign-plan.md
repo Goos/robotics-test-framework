@@ -57,6 +57,7 @@ The 3R IK already handles the geometry — same `ik_3r(radial, z, target_pitch, 
 - Controller loops the SearchAndPlace state machine; needs the scan-pose pattern applied to each iteration.
 - **Commit shape**: 1–2 commits, builds on Step 4.1's pattern.
 - **Acceptance**: 3 seeds + debug-overlay variant all pass within 90s deadline.
+- **Acceptance partially met**: 3 of 4 seeds pass (42, 1337, 42_with_debug_overlay); seed 1 remains ignored due to a spawn-during-sweep timing collision — see commit body for detail.
 
 ### Step 4.3 — `find_by_touch`
 

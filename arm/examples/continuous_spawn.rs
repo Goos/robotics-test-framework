@@ -54,9 +54,22 @@ use rtf_sim::{
 
 // -- Controller ----------------------------------------------------------
 
+/// State machine for continuous_spawn. Step 4.2 mirrors
+/// find_grasp_place's Step 4.1 + 4.1.1 redesign: scan-pose sweep at
+/// `scan_z` (wrist level, fingers horizontal so they don't bulldoze
+/// blocks), coarse-then-fine centroid localization, retract-before-
+/// rotate, slow grasp-pose descent, then place + loop. After each
+/// successful place the EE finishes at PARK_Z over the bin, so the
+/// next iteration re-enters `LiftToScanAltitude` to get back to
+/// scan altitude before sweeping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CSState {
+    LiftToScanAltitude,
     Sweeping,
+    LocalizeFineSweep,
+    LiftAndRetract,
+    RotateWristForGrasp,
+    ApproachOverContact,
     DescendToContact,
     CloseGripper(u32),
     AscendWithBlock,
@@ -69,9 +82,36 @@ const GRASP_Z: f32 = 0.55;
 const PARK_Z: f32 = 0.85;
 const CLOSE_HOLD_TICKS: u32 = 200;
 const OPEN_HOLD_TICKS: u32 = 200;
-/// Phase 3.4.5c: cumulative chain pitch the controller drives (J1+J2+J3)
-/// to keep EE +x = world -z (fingers protruding straight down).
-const TARGET_WRIST_PITCH: f32 = core::f32::consts::FRAC_PI_2;
+/// Cumulative chain pitch (J1+J2+J3) for the wrist-DOWN GRASP pose:
+/// EE +x = world -z. Mirrors find_grasp_place's `GRASP_WRIST_PITCH`.
+const GRASP_WRIST_PITCH: f32 = core::f32::consts::FRAC_PI_2;
+/// Cumulative chain pitch for the wrist-LEVEL SCAN pose (Step 4.2):
+/// EE +x = world +x, fingers horizontal forward of EE so the sweep
+/// doesn't bulldoze blocks.
+const SCAN_WRIST_PITCH: f32 = 0.0;
+/// Vertical clearance (m) above `scan_z` for the retract-and-rotate
+/// position and for the horizontal approach over contact_xy.
+/// Mirrors find_grasp_place's `APPROACH_DZ`.
+const APPROACH_DZ: f32 = 0.05;
+/// Radial pullback factor for the LiftAndRetract state. Mirrors
+/// find_grasp_place's `RETRACT_FACTOR`.
+const RETRACT_FACTOR: f32 = 0.70;
+/// Ticks for the J3 wrist rotation from scan-pose (0) to grasp-pose
+/// (π/2). Mirrors find_grasp_place's `ROTATE_WRIST_TICKS`.
+const ROTATE_WRIST_TICKS: u32 = 600;
+/// Step 4.2 (mirrors Step 4.1.1): fine-raster stripe spacing (m) for
+/// the LocalizeFineSweep state. Tighter than the coarse `stripe_dy`
+/// so any block sits within ≤1 cm of some fine stripe, enabling
+/// sub-cm xy localization rather than the coarse ±2-3 cm bias.
+const FINE_STRIPE_DY: f32 = 0.02;
+/// Fine-raster y half-range (m) around the coarse peak. 8 cm
+/// covers ±1.5 coarse-stripe spacings so an off-stripe block whose
+/// closest stripe is biased by EE-dynamics still falls inside.
+const FINE_HALF_RANGE_Y: f32 = 0.08;
+/// Fine-raster x half-range (m) around the coarse peak. 8 cm
+/// matches the y range and covers EE-direction-of-travel bias in
+/// the coarse peak x.
+const FINE_HALF_RANGE_X: f32 = 0.08;
 
 #[allow(dead_code)]
 pub struct ContinuousSearchAndPlace<R, P, Pr>
@@ -81,10 +121,33 @@ where
     Pr: PortReader<PressureReading>,
 {
     state: CSState,
-    sweep_waypoints: Vec<(f32, f32, f32, f32)>,
+    /// Step 4.2: scan-pose waypoints (target_pitch=0, wrist level)
+    /// pre-computed at fixed `scan_z`.
+    scan_waypoints: Vec<(f32, f32, f32, f32)>,
     sweep_idx: usize,
+    /// Step 4.2: scan altitude (m). Bumped from 0.57 → 0.60 so the
+    /// wrist-level fingers (extending ±0.04 m vertically around the
+    /// EE in scan pose) clear the block top z=0.55. Pair with
+    /// enlarged eps=0.06 in the runner.
+    scan_z: f32,
+    /// Tick counter for `RotateWristForGrasp`. Mirrors
+    /// find_grasp_place's `rotate_wrist_n`.
+    rotate_wrist_n: u32,
+    /// Pressure-weighted centroid accumulator (sum of (p*x, p*y) +
+    /// total weight). Used by both the coarse `Sweeping` state and
+    /// the fine `LocalizeFineSweep` state; reset between them.
+    pressure_weighted_xy: (f64, f64),
+    pressure_weight_sum: f64,
+    /// Last known max pressure within the current contact event.
     peak_pressure: f32,
-    peak_xy: Option<(f32, f32)>,
+    /// Step 4.2: coarse-sweep peak xy (centroid). Set on Sweeping →
+    /// LocalizeFineSweep transition; used as the centre of the fine
+    /// raster.
+    coarse_peak_xy: Option<(f32, f32)>,
+    /// Step 4.2: fine-raster waypoint xy *offsets* relative to
+    /// `coarse_peak_xy`. Pre-computed at construction.
+    fine_raster_offsets: Vec<(f32, f32)>,
+    fine_idx: usize,
     contact_xy: Option<(f32, f32)>,
     target_bin_xy: (f32, f32),
     pressure_threshold: f32,
@@ -119,7 +182,7 @@ where
         gripper_tx: PortTx<GripperCommand>,
         region_x: (f32, f32),
         region_y: (f32, f32),
-        sweep_z: f32,
+        scan_z: f32,
         stripe_dy: f32,
         target_bin_xy: (f32, f32),
         arm_shoulder_z: f32,
@@ -129,23 +192,34 @@ where
         target_count: u32,
     ) -> Self {
         let xy_waypoints = serpentine_waypoints(region_x, region_y, stripe_dy);
-        let sweep_waypoints: Vec<(f32, f32, f32, f32)> = xy_waypoints
+        let scan_waypoints: Vec<(f32, f32, f32, f32)> = xy_waypoints
             .iter()
             .map(|&(x, y)| {
                 let r = (x * x + y * y).sqrt();
                 let (j1, j2, j3) =
-                    ik_3r(r, sweep_z - arm_shoulder_z, TARGET_WRIST_PITCH, l1, l2, l3)
-                        .expect("sweep waypoint unreachable — check region vs arm reach");
+                    ik_3r(r, scan_z - arm_shoulder_z, SCAN_WRIST_PITCH, l1, l2, l3)
+                        .expect("scan waypoint unreachable — check region vs arm reach");
                 let yaw = y.atan2(x);
                 (yaw, j1, j2, j3)
             })
             .collect();
+        let fine_raster_offsets = serpentine_waypoints(
+            (-FINE_HALF_RANGE_X, FINE_HALF_RANGE_X),
+            (-FINE_HALF_RANGE_Y, FINE_HALF_RANGE_Y),
+            FINE_STRIPE_DY,
+        );
         Self {
-            state: CSState::Sweeping,
-            sweep_waypoints,
+            state: CSState::LiftToScanAltitude,
+            scan_waypoints,
             sweep_idx: 0,
+            scan_z,
+            rotate_wrist_n: 0,
+            pressure_weighted_xy: (0.0, 0.0),
+            pressure_weight_sum: 0.0,
             peak_pressure: 0.0,
-            peak_xy: None,
+            coarse_peak_xy: None,
+            fine_raster_offsets,
+            fine_idx: 0,
             contact_xy: None,
             target_bin_xy,
             pressure_threshold: 0.2,
@@ -162,15 +236,12 @@ where
             gripper_tx,
             joint_tol: 0.02,
         }
-        // pressure_threshold remains 0.2 above; the second-pass refinement
-        // happens via `min_commit_peak` checked at trigger time below.
     }
 
-    /// Minimum peak pressure required to actually commit to descent.
-    /// Lowered from the v1 0.5 to 0.2 in Step 1.13: under Rapier the arm
-    /// physically pushes blocks during sweep so peaks degrade by the
-    /// time we trigger; the wider 0.10 m gripper proximity (Step 1.12 in
-    /// build_continuous_spawn_world) absorbs the corresponding xy error.
+    /// Minimum peak pressure required to commit to a localization
+    /// pass. Same gate as v1; the post-localization grasp accuracy
+    /// is now driven by the fine raster's centroid, not by this
+    /// threshold.
     const MIN_COMMIT_PEAK: f32 = 0.2;
 
     pub fn state(&self) -> CSState {
@@ -194,6 +265,13 @@ where
     }
 
     fn drive_joints_toward(&mut self, target: (f32, f32, f32, f32)) {
+        self.drive_joints_toward_with_clamp(target, 2.0);
+    }
+
+    /// Same as `drive_joints_toward` but with a configurable speed
+    /// clamp. Slow descent (clamp ~0.5) reduces side-impulse on the
+    /// block during the final approach. Mirrors find_grasp_place.
+    fn drive_joints_toward_with_clamp(&mut self, target: (f32, f32, f32, f32), clamp: f32) {
         let qs = self.joint_qs();
         for (i, t) in [
             (0usize, target.0),
@@ -205,7 +283,7 @@ where
                 break;
             }
             let cur = qs.get(i).copied().unwrap_or(0.0);
-            let q_dot = ((t - cur) * 4.0).clamp(-2.0, 2.0);
+            let q_dot = ((t - cur) * 4.0).clamp(-clamp, clamp);
             self.velocity_txs[i].send(JointVelocityCommand {
                 joint: JointId(i as u32),
                 q_dot_target: q_dot,
@@ -234,29 +312,60 @@ where
             && (q3 - target.3).abs() < self.joint_tol
     }
 
+    /// Compute (J0, J1, J2, J3) for an EE world xy at altitude `z`
+    /// with the wrist DOWN (grasp pose). Used for approach, descend,
+    /// ascend, place.
     fn ik_target_for(&self, xy: (f32, f32), z: f32) -> (f32, f32, f32, f32) {
+        self.ik_target_with_pitch(xy, z, GRASP_WRIST_PITCH)
+    }
+
+    /// Generic 4-DOF IK helper: (yaw, J1, J2, J3) for an EE world xy
+    /// at altitude `z` with cumulative pitch `target_pitch`. Mirrors
+    /// find_grasp_place's helper.
+    fn ik_target_with_pitch(
+        &self,
+        xy: (f32, f32),
+        z: f32,
+        target_pitch: f32,
+    ) -> (f32, f32, f32, f32) {
         let (x, y) = xy;
         let r = (x * x + y * y).sqrt();
         let (j1, j2, j3) = ik_3r(
             r,
             z - self.arm_shoulder_z,
-            TARGET_WRIST_PITCH,
+            target_pitch,
             self.l1,
             self.l2,
             self.l3,
         )
-        .expect("post-contact IK target unreachable — check geometry");
+        .expect("IK target unreachable — check geometry");
         (y.atan2(x), j1, j2, j3)
+    }
+
+    /// Joint target for the retract-before-rotate state: EE pulled
+    /// radially inward and up by APPROACH_DZ in scan pose. Mirrors
+    /// find_grasp_place.
+    fn retracted_scan_target(&self, contact_xy: (f32, f32)) -> (f32, f32, f32, f32) {
+        let retracted_xy = (
+            contact_xy.0 * RETRACT_FACTOR,
+            contact_xy.1 * RETRACT_FACTOR,
+        );
+        self.ik_target_with_pitch(retracted_xy, self.scan_z + APPROACH_DZ, SCAN_WRIST_PITCH)
     }
 
     /// Reset the sweep state for the next cycle. Called on
     /// OpenGripper-completion (when not yet `Done`) and on
-    /// sweep-exhausted-without-contact.
+    /// sweep-exhausted-without-contact. Step 4.2: also clears the
+    /// fine-raster state and centroid accumulators.
     fn reset_sweep(&mut self) {
         self.sweep_idx = 0;
+        self.pressure_weighted_xy = (0.0, 0.0);
+        self.pressure_weight_sum = 0.0;
         self.peak_pressure = 0.0;
-        self.peak_xy = None;
+        self.coarse_peak_xy = None;
+        self.fine_idx = 0;
         self.contact_xy = None;
+        self.rotate_wrist_n = 0;
     }
 }
 
@@ -270,40 +379,151 @@ where
         let pressure = self.pressure_rx.latest().map(|r| r.pressure).unwrap_or(0.0);
 
         match self.state {
+            CSState::LiftToScanAltitude => {
+                // Drive from current pose into the first scan
+                // waypoint. Used at startup AND after every place
+                // (EE finishes at PARK_Z over the bin, must
+                // re-approach scan altitude before sweeping).
+                let target = self.scan_waypoints[self.sweep_idx];
+                self.drive_joints_toward(target);
+                if self.joints_converged_to(target) {
+                    self.state = CSState::Sweeping;
+                }
+            }
             CSState::Sweeping => {
-                if pressure > self.peak_pressure {
-                    self.peak_pressure = pressure;
-                    if let Some(xy) = self.ee_xy() {
-                        self.peak_xy = Some(xy);
+                // Pressure-weighted centroid coarse-localization.
+                // Same as find_grasp_place Step 4.1.
+                if pressure > self.pressure_threshold {
+                    if let Some((x, y)) = self.ee_xy() {
+                        let p = pressure as f64;
+                        self.pressure_weighted_xy.0 += p * x as f64;
+                        self.pressure_weighted_xy.1 += p * y as f64;
+                        self.pressure_weight_sum += p;
+                    }
+                    if pressure > self.peak_pressure {
+                        self.peak_pressure = pressure;
                     }
                 }
 
-                // Wait until the peak settles (pressure has fallen back
-                // below threshold) AND the peak was strong enough to
-                // trust as a real grasp candidate. Weak grazes (peak
-                // 0.2-0.5) leave the recorded peak xy too far from the
-                // block centre for the gripper's 5 cm proximity to bite.
-                if self.peak_pressure >= Self::MIN_COMMIT_PEAK && pressure < self.pressure_threshold
+                // Step 4.2 (mirrors Step 4.1.1): commit the coarse
+                // centroid as `coarse_peak_xy` and hand off to
+                // LocalizeFineSweep for sub-cm refinement.
+                if self.peak_pressure >= Self::MIN_COMMIT_PEAK
+                    && pressure < self.pressure_threshold
+                    && self.pressure_weight_sum > 0.0
                 {
-                    self.contact_xy = self.peak_xy;
-                    self.state = CSState::DescendToContact;
+                    let cx = (self.pressure_weighted_xy.0 / self.pressure_weight_sum) as f32;
+                    let cy = (self.pressure_weighted_xy.1 / self.pressure_weight_sum) as f32;
+                    self.coarse_peak_xy = Some((cx, cy));
+                    self.pressure_weighted_xy = (0.0, 0.0);
+                    self.pressure_weight_sum = 0.0;
+                    self.peak_pressure = 0.0;
+                    self.fine_idx = 0;
+                    self.state = CSState::LocalizeFineSweep;
                     self.halt_joints();
                     return Ok(());
                 }
 
-                let target = self.sweep_waypoints[self.sweep_idx];
+                let target = self.scan_waypoints[self.sweep_idx];
                 self.drive_joints_toward(target);
                 if self.joints_converged_to(target) {
                     self.sweep_idx += 1;
-                    if self.sweep_idx >= self.sweep_waypoints.len() {
+                    if self.sweep_idx >= self.scan_waypoints.len() {
+                        // Sweep exhausted without contact — wrap
+                        // back and keep waiting for the next spawned
+                        // block. Harness deadline catches a true
+                        // failure.
                         self.reset_sweep();
                     }
+                }
+            }
+            CSState::LocalizeFineSweep => {
+                // Walk a small dense raster centred on
+                // `coarse_peak_xy`; accumulate a fresh weighted
+                // centroid; commit when raster is exhausted.
+                // Mirrors find_grasp_place Step 4.1.1.
+                let centre = self
+                    .coarse_peak_xy
+                    .expect("coarse_peak_xy set on Sweeping exit");
+
+                if pressure > self.pressure_threshold {
+                    if let Some((x, y)) = self.ee_xy() {
+                        let p = pressure as f64;
+                        self.pressure_weighted_xy.0 += p * x as f64;
+                        self.pressure_weighted_xy.1 += p * y as f64;
+                        self.pressure_weight_sum += p;
+                    }
+                    if pressure > self.peak_pressure {
+                        self.peak_pressure = pressure;
+                    }
+                }
+
+                if self.fine_idx >= self.fine_raster_offsets.len() {
+                    let final_xy = if self.pressure_weight_sum > 0.0 {
+                        (
+                            (self.pressure_weighted_xy.0 / self.pressure_weight_sum) as f32,
+                            (self.pressure_weighted_xy.1 / self.pressure_weight_sum) as f32,
+                        )
+                    } else {
+                        centre
+                    };
+                    self.contact_xy = Some(final_xy);
+                    self.rotate_wrist_n = 0;
+                    self.state = CSState::LiftAndRetract;
+                    self.halt_joints();
+                    return Ok(());
+                }
+
+                let (dx, dy) = self.fine_raster_offsets[self.fine_idx];
+                let target = self.ik_target_with_pitch(
+                    (centre.0 + dx, centre.1 + dy),
+                    self.scan_z,
+                    SCAN_WRIST_PITCH,
+                );
+                self.drive_joints_toward(target);
+                if self.joints_converged_to(target) {
+                    self.fine_idx += 1;
+                }
+            }
+            CSState::LiftAndRetract => {
+                let cxy = self.contact_xy.expect("contact_xy set on LocalizeFineSweep exit");
+                let target = self.retracted_scan_target(cxy);
+                self.drive_joints_toward(target);
+                if self.joints_converged_to(target) {
+                    self.state = CSState::RotateWristForGrasp;
+                }
+            }
+            CSState::RotateWristForGrasp => {
+                let cxy = self.contact_xy.expect("contact_xy set on LocalizeFineSweep exit");
+                let scan_target = self.retracted_scan_target(cxy);
+                let target = (
+                    scan_target.0,
+                    scan_target.1,
+                    scan_target.2,
+                    scan_target.3 + GRASP_WRIST_PITCH,
+                );
+                self.drive_joints_toward(target);
+                self.rotate_wrist_n += 1;
+                if self.rotate_wrist_n >= ROTATE_WRIST_TICKS
+                    && self.joints_converged_to(target)
+                {
+                    self.state = CSState::ApproachOverContact;
+                }
+            }
+            CSState::ApproachOverContact => {
+                let cxy = self.contact_xy.expect("contact_xy set on LocalizeFineSweep exit");
+                let target = self.ik_target_for(cxy, self.scan_z + APPROACH_DZ);
+                self.drive_joints_toward(target);
+                if self.joints_converged_to(target) {
+                    self.state = CSState::DescendToContact;
                 }
             }
             CSState::DescendToContact => {
                 let cxy = self.contact_xy.expect("contact_xy set on entry");
                 let target = self.ik_target_for(cxy, GRASP_Z);
-                self.drive_joints_toward(target);
+                // Slow descent (clamp 0.5 rad/s) — mirrors
+                // find_grasp_place Step 4.1.
+                self.drive_joints_toward_with_clamp(target, 0.5);
                 if self.joints_converged_to(target) {
                     self.state = CSState::CloseGripper(0);
                 }
@@ -314,19 +534,23 @@ where
                 });
                 self.halt_joints();
                 if n >= CLOSE_HOLD_TICKS {
-                    // Verify a block was actually grasped before
-                    // committing to the place sequence: if the EE
-                    // pressure has fallen back to ~0 then the block
-                    // wasn't there (likely pushed away during sweep).
-                    // Skip the place and retry sweep. Threshold 0.5
-                    // matches MIN_COMMIT_PEAK so any meaningful held
-                    // contact qualifies.
+                    // Verify a block was actually grasped: if EE
+                    // pressure is ~0 the gripper closed on air (block
+                    // got pushed away during descent or contact_xy
+                    // was off the actual block). Skip the place
+                    // sequence (don't bump placed_count for a phantom
+                    // grasp) and restart the sweep loop. Threshold
+                    // 0.5 matches MIN_COMMIT_PEAK so any held
+                    // contact qualifies. Mirrors the v1 retry logic
+                    // — necessary in continuous_spawn because the
+                    // loop's sequential attempts compound any
+                    // localization error.
                     if pressure < 0.5 {
                         self.gripper_tx.send(GripperCommand {
                             target_separation: 0.04,
                         });
                         self.reset_sweep();
-                        self.state = CSState::Sweeping;
+                        self.state = CSState::LiftToScanAltitude;
                     } else {
                         self.state = CSState::AscendWithBlock;
                     }
@@ -365,8 +589,12 @@ where
                     self.state = if self.placed_count >= self.target_count {
                         CSState::Done
                     } else {
+                        // EE is at PARK_Z over the bin (yaw=π/2,
+                        // wrist down). Re-enter LiftToScanAltitude
+                        // so the next sweep cycle starts from a
+                        // proper scan-pose waypoint.
                         self.reset_sweep();
-                        CSState::Sweeping
+                        CSState::LiftToScanAltitude
                     };
                 } else {
                     self.state = CSState::OpenGripper(n + 1);
@@ -585,7 +813,10 @@ const SPAWN_INTERVAL_SECS: i64 = 15;
 // Bumped from 60 → 90 s after Step 1.13: with Rapier physics each
 // pick-place cycle takes longer (the arm pushes blocks during sweep,
 // adding lift+approach overhead) and the third block needs settle time
-// after release before NObjectsInBin counts it.
+// after release before NObjectsInBin counts it. Step 4.2 confirmed
+// 90 s is still sufficient under the redesigned state machine
+// (fine-raster LocalizeFineSweep adds ~9 s/cycle but the slow grasp
+// descent eliminates wasted retry cycles for 3 of 4 seeds).
 const DEADLINE_SECS: i64 = 90;
 
 fn run_continuous_spawn(seed: u64, rrd_name: &str) -> rtf_harness::RunResult {
@@ -605,7 +836,10 @@ fn run_continuous_spawn_with(
     }
     let ports = world.attach_standard_arm_ports();
     let ee_pose_rx = world.attach_ee_pose_sensor(RateHz::new(100));
-    let pressure_rx = world.attach_pressure_sensor(RateHz::new(1000), 0.03);
+    // Step 4.2: eps bumped from 0.03 → 0.06 m so the pressure sensor
+    // still reaches the block top from the new finger-clearing scan
+    // altitude. Mirrors find_grasp_place's Step 4.1 tuning.
+    let pressure_rx = world.attach_pressure_sensor(RateHz::new(1000), 0.06);
 
     let controller = ContinuousSearchAndPlace::new(
         ports.encoder_rxs,
@@ -615,13 +849,17 @@ fn run_continuous_spawn_with(
         ports.gripper_tx,
         SEARCH_REGION_X,
         SEARCH_REGION_Y,
-        /* sweep_z */ 0.57,
-        // Tighter than find_grasp_place's 0.05 — finer sampling improves
-        // peak-xy resolution so post-trigger contact_xy stays inside the
-        // gripper proximity threshold. 0.03 keeps worst-case offset
-        // under ~3 cm while still covering the search region quickly.
+        // Step 4.2: scan altitude bumped from 0.57 → 0.60 m so the
+        // wrist-level fingers (which protrude ±0.04 m vertically
+        // around the EE in scan pose) clear the block top z=0.55.
+        /* scan_z */
+        0.60,
+        // 0.05 m matches find_grasp_place's coarse stripe spacing.
+        // The fine-raster `LocalizeFineSweep` then refines xy to ~1 cm
+        // accuracy regardless of where the block sits relative to
+        // coarse stripes, so we don't need a tighter coarse spacing.
         /* stripe_dy */
-        0.03,
+        0.05,
         /* target_bin_xy */ (0.0, 0.6),
         /* arm_shoulder_z */ 0.8,
         /* l1 */ 0.4,
@@ -664,19 +902,24 @@ fn main() {
 
 // -- Tests --------------------------------------------------------------
 //
-// Phase 3.5 scope-cut: all four continuous_spawn e2e seeds are
-// `#[ignore]` for the same reason the find_grasp_place far-corner seeds
-// are — Phase 3.4.5d's wrist-down geometry has fingers extending 8 cm
-// below the EE, so the sweep at z=0.57 ploughs through the spawned
-// blocks before the pressure-peak algorithm can localize them. The
-// continuous_spawn scenario amplifies this because it runs the
-// sweep-grasp-place cycle three times back-to-back; any single failure
-// drops the score to 0. pick_place (known block xy) converges in 5.4 s
-// score 1.0 with the same joint-grasp implementation, confirming the
-// joint-grasp itself is sound. Re-tuning the sweep-driven scenarios is
-// future work (controller redesign required); ignored here so the
-// V-gate sweep stays green.
+// Step 4.2 redesign re-enabled the previously-ignored seeds: scan
+// pose (wrist level, target_pitch=0) keeps the fingers horizontal
+// during sweep so they no longer plough through the block top, a
+// retract-before-rotate transition (LiftAndRetract →
+// RotateWristForGrasp → ApproachOverContact) pivots J3 from 0 → π/2
+// in empty space well clear of the block, and a fine-raster
+// `LocalizeFineSweep` between the coarse sweep and approach refines
+// contact_xy to sub-cm accuracy so the loop's sequential grasps
+// don't compound localization error. See
+// `docs/plans/2026-05-08-sweep-controllers-redesign-plan.md`.
 
+// Spawn timing collision — block 1 spawns at t=15s during attempt 1's
+// place sequence; the in-flight arm displaces it 12+ cm, leaving
+// attempt 3 to localize at the wrong xy. Inherent risk of the
+// spawn-while-busy scenario under real physics, not a controller
+// regression. The redesign succeeds for 3 of 4 seeds; revisit if a
+// future scenario redesign decouples spawn timing from cycle duration
+// (e.g., spawn N seconds after previous block reaches Settled in bin).
 #[test]
 #[ignore]
 fn continuous_spawn_seed_1() {
@@ -696,7 +939,6 @@ fn continuous_spawn_seed_1() {
 }
 
 #[test]
-#[ignore]
 fn continuous_spawn_seed_42() {
     let seed = 42_u64;
     let res = run_continuous_spawn(seed, "continuous_spawn_seed_42");
@@ -714,7 +956,6 @@ fn continuous_spawn_seed_42() {
 }
 
 #[test]
-#[ignore]
 fn continuous_spawn_seed_1337() {
     let seed = 1337_u64;
     let res = run_continuous_spawn(seed, "continuous_spawn_seed_1337");
@@ -733,7 +974,6 @@ fn continuous_spawn_seed_1337() {
 
 /// Sanity-check: the Rapier debug overlay doesn't break continuous-spawn.
 #[test]
-#[ignore]
 fn continuous_spawn_seed_42_with_debug_overlay() {
     let seed = 42_u64;
     let res = run_continuous_spawn_with(seed, "continuous_spawn_seed_42_overlay", true);
