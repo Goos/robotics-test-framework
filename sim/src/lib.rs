@@ -3,7 +3,6 @@
 pub mod entity;
 pub mod faults;
 pub mod fixture;
-pub mod gravity;
 pub mod object;
 pub mod physics;
 pub mod primitive;
@@ -17,9 +16,6 @@ pub mod visualizable;
 
 pub use entity::EntityId;
 pub use fixture::Fixture;
-pub use gravity::{
-    find_support_beneath, gravity_step, reevaluate_settled, GRAVITY_M_PER_S2, SETTLE_EPSILON_M,
-};
 pub use object::{ArmRef, Object, ObjectId, ObjectState, SupportId};
 pub use primitive::{Color, Primitive, SceneSnapshot};
 pub use rate_scheduler::RateScheduler;

@@ -405,16 +405,6 @@ impl ArmWorld {
     /// Named `_inner` so the `RunnableWorld::consume_actuators_and_integrate`
     /// trait method can delegate here without recursing into itself.
     pub fn consume_actuators_and_integrate_inner(&mut self, dt: Duration) {
-        // Kinematic-only gravity path (design v2 §5.5) — preserved behind
-        // the `not(physics-rapier)` cfg so the default build keeps
-        // working through Phase 1 of the Rapier integration. Step 1.13
-        // removes this branch entirely once Rapier is the only path.
-        #[cfg(not(feature = "physics-rapier"))]
-        if self.gravity_enabled {
-            rtf_sim::gravity::reevaluate_settled(&mut self.scene);
-            rtf_sim::gravity::gravity_step(&mut self.scene, dt.as_nanos());
-        }
-
         let dt_s = dt.as_nanos() as f32 / 1.0e9_f32;
 
         // Drain joint-velocity commands; latest wins per port. Collect first

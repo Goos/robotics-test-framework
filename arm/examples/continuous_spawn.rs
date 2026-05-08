@@ -157,11 +157,12 @@ where
         // happens via `min_commit_peak` checked at trigger time below.
     }
 
-    /// Minimum peak pressure required to actually commit to descent. Higher
-    /// than `pressure_threshold` so we ignore weak grazes that would put
-    /// the recorded contact_xy outside the gripper's 5 cm proximity
-    /// threshold. Empirically ~0.5 → EE within ~1.5 cm of block surface.
-    const MIN_COMMIT_PEAK: f32 = 0.5;
+    /// Minimum peak pressure required to actually commit to descent.
+    /// Lowered from the v1 0.5 to 0.2 in Step 1.13: under Rapier the arm
+    /// physically pushes blocks during sweep so peaks degrade by the
+    /// time we trigger; the wider 0.10 m gripper proximity (Step 1.12 in
+    /// build_continuous_spawn_world) absorbs the corresponding xy error.
+    const MIN_COMMIT_PEAK: f32 = 0.2;
 
     pub fn state(&self) -> CSState {
         self.state
@@ -287,11 +288,24 @@ where
             CSState::CloseGripper(n) => {
                 self.gripper_tx.send(GripperCommand { close: true });
                 self.halt_joints();
-                self.state = if n >= CLOSE_HOLD_TICKS {
-                    CSState::AscendWithBlock
+                if n >= CLOSE_HOLD_TICKS {
+                    // Verify a block was actually grasped before
+                    // committing to the place sequence: if the EE
+                    // pressure has fallen back to ~0 then the block
+                    // wasn't there (likely pushed away during sweep).
+                    // Skip the place and retry sweep. Threshold 0.5
+                    // matches MIN_COMMIT_PEAK so any meaningful held
+                    // contact qualifies.
+                    if pressure < 0.5 {
+                        self.gripper_tx.send(GripperCommand { close: false });
+                        self.reset_sweep();
+                        self.state = CSState::Sweeping;
+                    } else {
+                        self.state = CSState::AscendWithBlock;
+                    }
                 } else {
-                    CSState::CloseGripper(n + 1)
-                };
+                    self.state = CSState::CloseGripper(n + 1);
+                }
             }
             CSState::AscendWithBlock => {
                 let cxy = self.contact_xy.expect("contact_xy persists after grasp");
@@ -415,7 +429,11 @@ fn build_continuous_spawn_world(seed: u64, n_spawns: u32, interval: Duration) ->
             Isometry3::translation(0.4, 0.0, 0.0),
         ],
         gripper: GripperSpec {
-            proximity_threshold: 0.05,
+            // Wider than the pick-and-place threshold (0.05) for the same
+            // reason build_search_world bumps it to 0.10 (Step 1.12): an
+            // arm-link-pushed block lands a few cm from the EE descent
+            // target, and the grasp logic needs the slack.
+            proximity_threshold: 0.10,
             max_grasp_size: 0.1,
         },
     };
@@ -523,7 +541,11 @@ impl Goal<ArmWorld> for NObjectsInBin {
 
 const N_SPAWNS: u32 = 3;
 const SPAWN_INTERVAL_SECS: i64 = 15;
-const DEADLINE_SECS: i64 = 60;
+// Bumped from 60 → 90 s after Step 1.13: with Rapier physics each
+// pick-place cycle takes longer (the arm pushes blocks during sweep,
+// adding lift+approach overhead) and the third block needs settle time
+// after release before NObjectsInBin counts it.
+const DEADLINE_SECS: i64 = 90;
 
 fn run_continuous_spawn(seed: u64, rrd_name: &str) -> rtf_harness::RunResult {
     let _ = rrd_name; // used only when viz-rerun is on
@@ -544,9 +566,8 @@ fn run_continuous_spawn(seed: u64, rrd_name: &str) -> rtf_harness::RunResult {
         /* sweep_z */ 0.57,
         // Tighter than find_grasp_place's 0.05 — finer sampling improves
         // peak-xy resolution so post-trigger contact_xy stays inside the
-        // gripper proximity threshold (0.05 m). With 0.05 stripe spacing,
-        // some seeds produced peaks ~5 cm off the true block xy, just over
-        // the grasp threshold; 0.03 brings worst-case offset under 3 cm.
+        // gripper proximity threshold. 0.03 keeps worst-case offset
+        // under ~3 cm while still covering the search region quickly.
         /* stripe_dy */
         0.03,
         /* target_bin_xy */ (0.0, 0.6),

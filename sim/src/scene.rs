@@ -43,7 +43,8 @@ impl Scene {
     }
 
     /// Mutable iteration over objects (BTreeMap-ordered, deterministic).
-    /// Used by `gravity::gravity_step` to integrate Free objects' z-velocity.
+    /// Used by the arm world's settled-from-velocity pass after each
+    /// Rapier step to flip object states between Free and Settled.
     pub fn objects_mut(&mut self) -> impl Iterator<Item = (&ObjectId, &mut Object)> {
         self.objects.iter_mut()
     }
@@ -88,16 +89,14 @@ impl Scene {
     }
 
     /// Remove a fixture by id; returns it if present (so callers can inspect
-    /// the removed value, e.g. for snapshot diffing). Used by gravity-fall
-    /// `reevaluate_settled` tests where a support disappears mid-run.
+    /// the removed value, e.g. for snapshot diffing).
     pub fn remove_fixture(&mut self, id: u32) -> Option<Fixture> {
         self.fixtures.remove(&id)
     }
 
     /// True iff a support with the given id currently exists. For
     /// `SupportId::Object(id)` the object must also still be Settled (a
-    /// re-Freed object stops being a support). Consumed by
-    /// `gravity::reevaluate_settled` (Step 6.4).
+    /// re-Freed object stops being a support).
     ///
     /// `SupportId::Unknown` always returns `true` — Rapier-derived
     /// settled state doesn't track support, so there's nothing to lose

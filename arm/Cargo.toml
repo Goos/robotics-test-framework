@@ -4,7 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 
 [features]
-default = []
+default = ["physics-rapier"]
 # Test scenarios + helpers (test_helpers module) used by example binaries
 # under examples/ and by the release_falls integration test. Gated so the
 # default build doesn't pull in the helper code.
@@ -13,8 +13,8 @@ examples = []
 # `#![cfg(feature = "e2e")]`. Pulls in `examples` for test_helpers access.
 e2e = ["examples"]
 # Rapier-backed dynamics + arm-vs-object contact (rapier-integration plan,
-# Phase 1). Default off through Phase 1 — flips on in Step 1.13 once the
-# kinematic gravity_step path is removed.
+# Phase 1). Default-on as of Step 1.13 once the kinematic gravity_step
+# path was removed.
 physics-rapier = ["rtf_sim/physics-rapier"]
 # Phase 8: rerun-backed example variants. Pulls in `e2e` plus the rerun
 # feature on rtf_viz so the pick_place example can plug a `RerunRecorder`
@@ -52,7 +52,7 @@ required-features = ["examples"]
 
 [[example]]
 name = "find_by_touch"
-required-features = ["examples", "physics-rapier"]
+required-features = ["examples"]
 
 [lints]
 workspace = true
