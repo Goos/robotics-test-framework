@@ -58,6 +58,17 @@ pub struct JointVelocityCommand {
 /// The world drives `arm.state.gripper_separation` toward this value at
 /// a fixed rate (0.5 m/s). Conventional "open" target is 0.04 m,
 /// "close" is 0.012 m.
+///
+/// On the gripper-close edge — i.e., the tick where `gripper_separation`
+/// first crosses below `GRIPPER_CLOSED_THRESHOLD_M` — Phase 3.5's
+/// joint-attached grasp inserts a Rapier `FixedJoint` between the EE
+/// arm-link kinematic body and any graspable object whose collider is
+/// in contact with both finger colliders. The held object stays Dynamic;
+/// the joint provides the rigid coupling. On gripper-open edge the
+/// joint is removed; per tick a slip-impulse threshold check on the
+/// joint can also release the grip mid-motion (modeling "this much
+/// load would have slipped under real friction"). See design §11.3 +
+/// `ArmWorld::derive_joint_grasp_state` for the full mechanism.
 #[derive(Copy, Clone, Debug)]
 pub struct GripperCommand {
     pub target_separation: f32,

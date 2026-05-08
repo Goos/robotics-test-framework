@@ -585,10 +585,18 @@ impl ArmWorld {
     /// a tiny separation wobble doesn't flap the state.
     const GRIPPER_OPEN_THRESHOLD_M: f32 = 0.035;
 
-    /// Phase 3.2: latch the most recent gripper command into
-    /// `gripper_target`. The actual finger motion + grasp/release
-    /// transitions happen in `update_gripper_separation_and_transitions`
-    /// each tick, after the slew toward target.
+    /// Latch the most recent gripper command into `gripper_target`.
+    /// The actual finger motion happens in
+    /// `update_gripper_separation_and_transitions` each tick (slew
+    /// `gripper_separation` toward `gripper_target` at
+    /// `GRIPPER_SLEW_RATE_M_PER_S`). The grasp / release transitions
+    /// themselves happen in `derive_joint_grasp_state` (Phase 3.5
+    /// joint-attached grasp) — on the gripper-close edge a Rapier
+    /// `FixedJoint` is inserted between the EE arm-link kinematic
+    /// body and the held object's dynamic body; on gripper-open the
+    /// joint is removed; per tick a slip-impulse check on the joint
+    /// can release the grip mid-motion. See `derive_joint_grasp_state`
+    /// + design §11.3 for details.
     fn apply_gripper_command(&mut self, cmd: GripperCommand) {
         self.arm.state.gripper_target = cmd.target_separation;
     }
