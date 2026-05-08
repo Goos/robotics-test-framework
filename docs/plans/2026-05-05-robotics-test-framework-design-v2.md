@@ -666,19 +666,32 @@ The decision to defer §9.6 is deliberate: lightweight contract first, enforceme
 
 ### 10.1 What "deterministic" means here
 
-Same scenario + same seed → bit-identical `RunResult` and snapshot stream **on a fixed toolchain version + target triple**.
+**Statistical reliability with seeded reproducibility.** Same binary + same seed → same outcome. The single-threaded harness gives this for free: a given build, run twice, will produce identical `RunResult`s.
 
-Cross-platform / cross-toolchain bit-identity is *not* claimed because `f32` transcendentals (`sin`, `cos` for FK) are not bit-identical across libm versions / `-ffast-math` settings / SIMD widening. If cross-platform reproducibility ever matters, the path is a software softfloat or fixed-point integration of FK — out of scope for v1.
+What is *not* claimed:
+
+- **Cross-binary bit-identity.** Different feature flags (e.g. Rapier `simd-stable` vs scalar), different Rapier versions, different CPUs, or different toolchains may produce different `RunResult`s for the same seed. That is no longer a regression — float results legitimately diverge under SIMD widening, libm differences, and `-ffast-math` settings.
+- **Cross-platform bit-identity.** Same as above: out of scope, would require softfloat / fixed-point FK + physics, not worth it for v1.
+
+What *is* still load-bearing:
+
+- **Within-binary determinism.** The V.1 gate is "all tests pass on two consecutive runs of the same binary." A test that passes once and fails the second time on the same binary is still a regression (likely a real race, not a tolerated cross-binary drift).
+- **Single-threaded harness.** Stays the default. Rapier's `parallel` feature stays disabled — it introduces tick-order nondeterminism *within a single binary run*, which is a different problem from the cross-binary divergence we now tolerate.
+- **`PcgNoiseSource` + seeded scenes.** Stays. Per-seed reproducibility is the foundation for investigating any specific failure (rerun with the same seed → same outcome on the same binary).
+- **`BTreeMap` over `HashMap` in the tick path.** Stays. Iteration-order stability is a debugging aid even when not strictly required by the determinism contract — diff-friendly trace output is cheap to keep.
+
+If cross-binary reproducibility ever matters again (e.g. for a regression-test golden file), the path is a software softfloat or fixed-point integration — out of scope for v1.
 
 ### 10.2 Forbidden in `core` and `sim` tick path (lint as a code-review invariant)
 
 | Forbidden | Reason | Replace with |
 |---|---|---|
-| `std::collections::HashMap` (during tick) | Iteration order is randomized | `BTreeMap` or `IndexMap` |
-| `std::time::Instant::now()` | Wall clock | Inject `Clock` |
-| `std::thread::spawn` / `rayon::*` | Schedule nondeterminism | Single-threaded only |
-| `rand::thread_rng()` | Implicit global RNG | Pass an explicitly seeded `StdRng` |
-| `f32::powi` / fast-math attributes | Cross-toolchain divergence | Plain integer ops where possible |
+| `std::collections::HashMap` (during tick) | Iteration order is randomized; debug-friendly traces want stable order even when not strictly required by §10.1 | `BTreeMap` or `IndexMap` |
+| `std::time::Instant::now()` | Wall clock conflates sim time with real time | Inject `Clock` |
+| `std::thread::spawn` / `rayon::*` | Schedule nondeterminism *within a single binary run* | Single-threaded only |
+| `rand::thread_rng()` | Implicit global RNG breaks per-seed reproducibility | Pass an explicitly seeded `StdRng` |
+
+`f32::powi` and similar transcendental ops were forbidden in v1 for cross-toolchain bit-identity. Per the §10.1 relaxation, that rationale no longer applies — they may be used freely now.
 
 These are documented in the workspace `README` and checked by reviewer eyeballs; a future `clippy` config can mechanize.
 
