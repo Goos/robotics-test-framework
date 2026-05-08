@@ -23,7 +23,7 @@
 
 use nalgebra::{Isometry3, Vector3};
 use rtf_arm::{
-    ik::ik_2r,
+    ik::ik_3r,
     ports::{
         EePoseReading, GripperCommand, JointEncoderReading, JointId, JointVelocityCommand,
         PressureReading,
@@ -69,6 +69,9 @@ const GRASP_Z: f32 = 0.55;
 const PARK_Z: f32 = 0.85;
 const CLOSE_HOLD_TICKS: u32 = 200;
 const OPEN_HOLD_TICKS: u32 = 200;
+/// Phase 3.4.5c: cumulative chain pitch the controller drives (J1+J2+J3)
+/// to keep EE +x = world -z (fingers protruding straight down).
+const TARGET_WRIST_PITCH: f32 = core::f32::consts::FRAC_PI_2;
 
 #[allow(dead_code)]
 pub struct ContinuousSearchAndPlace<R, P, Pr>
@@ -78,7 +81,7 @@ where
     Pr: PortReader<PressureReading>,
 {
     state: CSState,
-    sweep_waypoints: Vec<(f32, f32, f32)>,
+    sweep_waypoints: Vec<(f32, f32, f32, f32)>,
     sweep_idx: usize,
     peak_pressure: f32,
     peak_xy: Option<(f32, f32)>,
@@ -88,6 +91,9 @@ where
     arm_shoulder_z: f32,
     l1: f32,
     l2: f32,
+    /// Phase 3.4.5b: wrist link length, fed to ik_3r so J3 keeps EE +x =
+    /// world -z (fingers pointing down).
+    l3: f32,
     placed_count: u32,
     target_count: u32,
     encoder_rxs: Vec<R>,
@@ -119,17 +125,19 @@ where
         arm_shoulder_z: f32,
         l1: f32,
         l2: f32,
+        l3: f32,
         target_count: u32,
     ) -> Self {
         let xy_waypoints = serpentine_waypoints(region_x, region_y, stripe_dy);
-        let sweep_waypoints: Vec<(f32, f32, f32)> = xy_waypoints
+        let sweep_waypoints: Vec<(f32, f32, f32, f32)> = xy_waypoints
             .iter()
             .map(|&(x, y)| {
                 let r = (x * x + y * y).sqrt();
-                let (j1, j2) = ik_2r(r, sweep_z - arm_shoulder_z, l1, l2)
-                    .expect("sweep waypoint unreachable — check region vs arm reach");
+                let (j1, j2, j3) =
+                    ik_3r(r, sweep_z - arm_shoulder_z, TARGET_WRIST_PITCH, l1, l2, l3)
+                        .expect("sweep waypoint unreachable — check region vs arm reach");
                 let yaw = y.atan2(x);
-                (yaw, j1, j2)
+                (yaw, j1, j2, j3)
             })
             .collect();
         Self {
@@ -144,6 +152,7 @@ where
             arm_shoulder_z,
             l1,
             l2,
+            l3,
             placed_count: 0,
             target_count,
             encoder_rxs,
@@ -184,9 +193,14 @@ where
         Some((r.pose.translation.x, r.pose.translation.y))
     }
 
-    fn drive_joints_toward(&mut self, target: (f32, f32, f32)) {
+    fn drive_joints_toward(&mut self, target: (f32, f32, f32, f32)) {
         let qs = self.joint_qs();
-        for (i, t) in [(0usize, target.0), (1, target.1), (2, target.2)] {
+        for (i, t) in [
+            (0usize, target.0),
+            (1, target.1),
+            (2, target.2),
+            (3, target.3),
+        ] {
             if i >= self.velocity_txs.len() {
                 break;
             }
@@ -208,22 +222,31 @@ where
         }
     }
 
-    fn joints_converged_to(&self, target: (f32, f32, f32)) -> bool {
+    fn joints_converged_to(&self, target: (f32, f32, f32, f32)) -> bool {
         let qs = self.joint_qs();
         let q0 = qs.first().copied().unwrap_or(0.0);
         let q1 = qs.get(1).copied().unwrap_or(0.0);
         let q2 = qs.get(2).copied().unwrap_or(0.0);
+        let q3 = qs.get(3).copied().unwrap_or(0.0);
         (q0 - target.0).abs() < self.joint_tol
             && (q1 - target.1).abs() < self.joint_tol
             && (q2 - target.2).abs() < self.joint_tol
+            && (q3 - target.3).abs() < self.joint_tol
     }
 
-    fn ik_target_for(&self, xy: (f32, f32), z: f32) -> (f32, f32, f32) {
+    fn ik_target_for(&self, xy: (f32, f32), z: f32) -> (f32, f32, f32, f32) {
         let (x, y) = xy;
         let r = (x * x + y * y).sqrt();
-        let (j1, j2) = ik_2r(r, z - self.arm_shoulder_z, self.l1, self.l2)
-            .expect("post-contact IK target unreachable — check geometry");
-        (y.atan2(x), j1, j2)
+        let (j1, j2, j3) = ik_3r(
+            r,
+            z - self.arm_shoulder_z,
+            TARGET_WRIST_PITCH,
+            self.l1,
+            self.l2,
+            self.l3,
+        )
+        .expect("post-contact IK target unreachable — check geometry");
+        (y.atan2(x), j1, j2, j3)
     }
 
     /// Reset the sweep state for the next cycle. Called on
@@ -603,6 +626,7 @@ fn run_continuous_spawn_with(
         /* arm_shoulder_z */ 0.8,
         /* l1 */ 0.4,
         /* l2 */ 0.4,
+        /* l3 (wrist link, Phase 3.4.5b) */ 0.05,
         N_SPAWNS,
     );
     let goal = NObjectsInBin {

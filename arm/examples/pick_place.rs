@@ -14,7 +14,7 @@
 
 use rtf_arm::{
     goals::PlaceInBin,
-    ik::ik_2r,
+    ik::ik_3r,
     ports::{EePoseReading, GripperCommand, JointEncoderReading, JointId, JointVelocityCommand},
     test_helpers::{bin_id, block_id, build_pick_and_place_world},
     RateHz,
@@ -46,13 +46,15 @@ where
     ee_pose_rx: P,
     velocity_txs: Vec<PortTx<JointVelocityCommand>>,
     gripper_tx: PortTx<GripperCommand>,
-    /// Per-joint convergence threshold (radians). All three joints must be
+    /// Per-joint convergence threshold (radians). All four joints must be
     /// within this of their respective targets to advance state.
     joint_tol: f32,
-    /// IK solutions (J1, J2) for the three keyframe poses.
-    ik_above_block: (f32, f32),
-    ik_at_block: (f32, f32),
-    ik_above_bin: (f32, f32),
+    /// IK solutions (J1, J2, J3) for the three keyframe poses. J3 is the
+    /// wrist pitch driven so cumulative pitch = π/2 (EE +x = world -z,
+    /// fingers pointing down) at every keyframe.
+    ik_above_block: (f32, f32, f32),
+    ik_at_block: (f32, f32, f32),
+    ik_above_bin: (f32, f32, f32),
     close_hold_ticks: u32,
     open_hold_ticks: u32,
 }
@@ -81,8 +83,11 @@ where
 {
     /// Construct a PickPlace controller. Pre-computes IK for three keyframe
     /// EE poses (above_block, at_block, above_bin) where above_* targets sit
-    /// at z=0.85 and at_block sits 0.025 m above the block top. Panics if
-    /// any IK solve fails — the test fixture is supposed to be reachable.
+    /// at z=0.85 and at_block sits 0.025 m above the block top. Phase 3.4.5c
+    /// extends to the 4-joint Z-Y-Y-Y arm: each pre-computed IK uses
+    /// `ik_3r(..., target_pitch = π/2)` so EE +x = world -z (fingers
+    /// pointing straight down) at every keyframe. Panics if any IK solve
+    /// fails — the test fixture is supposed to be reachable.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         encoder_rxs: Vec<R>,
@@ -94,7 +99,9 @@ where
         arm_shoulder_z: f32,
         l1: f32,
         l2: f32,
+        l3: f32,
     ) -> Self {
+        use core::f32::consts::PI;
         let block_r =
             (target_block_xy.0 * target_block_xy.0 + target_block_xy.1 * target_block_xy.1).sqrt();
         let bin_r = (target_bin_xy.0 * target_bin_xy.0 + target_bin_xy.1 * target_bin_xy.1).sqrt();
@@ -103,11 +110,21 @@ where
         // (z=0.6) so the released block can fall into the bin.
         let block_grasp_z = 0.55_f32;
         let park_z = 0.85_f32;
-        let ik_at_block = ik_2r(block_r, block_grasp_z - arm_shoulder_z, l1, l2)
-            .expect("at_block target unreachable — check arm geometry vs block xy/z");
-        let ik_above_block = ik_2r(block_r, park_z - arm_shoulder_z, l1, l2)
+        // EE pointing straight down: cumulative pitch = π/2 (per ik.rs's
+        // "+α rotates +x toward -z" convention; see ik_3r doc).
+        let target_pitch = PI / 2.0;
+        let ik_at_block = ik_3r(
+            block_r,
+            block_grasp_z - arm_shoulder_z,
+            target_pitch,
+            l1,
+            l2,
+            l3,
+        )
+        .expect("at_block target unreachable — check arm geometry vs block xy/z");
+        let ik_above_block = ik_3r(block_r, park_z - arm_shoulder_z, target_pitch, l1, l2, l3)
             .expect("above_block target unreachable — check arm geometry vs block xy");
-        let ik_above_bin = ik_2r(bin_r, park_z - arm_shoulder_z, l1, l2)
+        let ik_above_bin = ik_3r(bin_r, park_z - arm_shoulder_z, target_pitch, l1, l2, l3)
             .expect("above_bin target unreachable — check arm geometry vs bin xy");
         Self {
             state: PickPlaceState::ApproachYaw,
@@ -153,9 +170,9 @@ where
 
     /// Send a per-joint velocity command computed via P-control on the
     /// position error toward `targets`. Joint 0's "target" is interpreted
-    /// as a yaw error (radians, already wrapped); joints 1+ as absolute
-    /// position targets.
-    fn drive_joints(&mut self, j0_yaw_err: f32, j1_target: f32, j2_target: f32) {
+    /// as a yaw error (radians, already wrapped); joints 1, 2, 3 as
+    /// absolute position targets (pitch / pitch / wrist pitch).
+    fn drive_joints(&mut self, j0_yaw_err: f32, j1_target: f32, j2_target: f32, j3_target: f32) {
         let qs = self.joint_qs();
         // J0: position-equivalent error is the yaw_err itself.
         let q_dot_0 = (j0_yaw_err * 4.0).clamp(-2.0, 2.0);
@@ -163,7 +180,11 @@ where
             joint: JointId(0),
             q_dot_target: q_dot_0,
         });
-        for (i, target) in [(1usize, j1_target), (2usize, j2_target)] {
+        for (i, target) in [
+            (1usize, j1_target),
+            (2usize, j2_target),
+            (3usize, j3_target),
+        ] {
             if i >= self.velocity_txs.len() {
                 break;
             }
@@ -185,8 +206,9 @@ where
         }
     }
 
-    /// True iff `|q[1] - j1_target| < tol AND |q[2] - j2_target| < tol`.
-    fn pitch_converged(&self, j1_target: f32, j2_target: f32) -> bool {
+    /// True iff each pitch joint is within `joint_tol` of its target
+    /// (J1, J2, J3 — Phase 3.4.5c includes the wrist).
+    fn pitch_converged(&self, j1_target: f32, j2_target: f32, j3_target: f32) -> bool {
         let qs = self.joint_qs();
         let j1_ok = qs
             .get(1)
@@ -194,7 +216,10 @@ where
         let j2_ok = qs
             .get(2)
             .is_some_and(|q| (q - j2_target).abs() < self.joint_tol);
-        j1_ok && j2_ok
+        let j3_ok = qs
+            .get(3)
+            .is_some_and(|q| (q - j3_target).abs() < self.joint_tol);
+        j1_ok && j2_ok && j3_ok
     }
 }
 
@@ -210,14 +235,26 @@ where
         let yaw_err_bin = self.yaw_error(self.target_bin_xy).unwrap_or(0.0);
         match self.state {
             PickPlaceState::ApproachYaw => {
-                self.drive_joints(yaw_err_block, 0.0, 0.0);
-                if yaw_err_block.abs() < self.joint_tol && self.pitch_converged(0.0, 0.0) {
+                // Pre-position with the wrist already pointing down so the
+                // descent in DescendOverBlock doesn't need to also slew the
+                // wrist (avoids tangling): J1 = J2 = 0, J3 = π/2 to give EE
+                // +x = world -z out of the gate.
+                use core::f32::consts::PI;
+                let j3_park = PI / 2.0;
+                self.drive_joints(yaw_err_block, 0.0, 0.0, j3_park);
+                if yaw_err_block.abs() < self.joint_tol && self.pitch_converged(0.0, 0.0, j3_park) {
                     self.state = PickPlaceState::DescendOverBlock;
                 }
             }
             PickPlaceState::DescendOverBlock => {
-                self.drive_joints(yaw_err_block, self.ik_at_block.0, self.ik_at_block.1);
-                if self.pitch_converged(self.ik_at_block.0, self.ik_at_block.1) {
+                self.drive_joints(
+                    yaw_err_block,
+                    self.ik_at_block.0,
+                    self.ik_at_block.1,
+                    self.ik_at_block.2,
+                );
+                if self.pitch_converged(self.ik_at_block.0, self.ik_at_block.1, self.ik_at_block.2)
+                {
                     self.state = PickPlaceState::CloseGripper(0);
                 }
             }
@@ -236,8 +273,17 @@ where
                 self.gripper_tx.send(GripperCommand {
                     target_separation: 0.012,
                 });
-                self.drive_joints(yaw_err_block, self.ik_above_block.0, self.ik_above_block.1);
-                if self.pitch_converged(self.ik_above_block.0, self.ik_above_block.1) {
+                self.drive_joints(
+                    yaw_err_block,
+                    self.ik_above_block.0,
+                    self.ik_above_block.1,
+                    self.ik_above_block.2,
+                );
+                if self.pitch_converged(
+                    self.ik_above_block.0,
+                    self.ik_above_block.1,
+                    self.ik_above_block.2,
+                ) {
                     self.state = PickPlaceState::YawToBin;
                 }
             }
@@ -245,9 +291,18 @@ where
                 self.gripper_tx.send(GripperCommand {
                     target_separation: 0.012,
                 });
-                self.drive_joints(yaw_err_bin, self.ik_above_bin.0, self.ik_above_bin.1);
+                self.drive_joints(
+                    yaw_err_bin,
+                    self.ik_above_bin.0,
+                    self.ik_above_bin.1,
+                    self.ik_above_bin.2,
+                );
                 if yaw_err_bin.abs() < self.joint_tol
-                    && self.pitch_converged(self.ik_above_bin.0, self.ik_above_bin.1)
+                    && self.pitch_converged(
+                        self.ik_above_bin.0,
+                        self.ik_above_bin.1,
+                        self.ik_above_bin.2,
+                    )
                 {
                     self.state = PickPlaceState::OpenGripper(0);
                 }
@@ -296,6 +351,7 @@ fn run_pick_place_with(rrd_name: &str, debug_overlay: bool) -> rtf_harness::RunR
         /* arm_shoulder_z */ 0.8,
         /* l1 */ 0.4,
         /* l2 */ 0.4,
+        /* l3 (wrist link, Phase 3.4.5b) */ 0.05,
     );
     let goal = PlaceInBin::new(block, bin);
 
@@ -363,9 +419,10 @@ mod pick_place_tests {
     use super::*;
     use rtf_core::port::{port, PortRx, PortTx};
 
-    /// Test rig: 3 encoder pubs, 1 EE pose pub, 3 velocity-cmd subs, 1
-    /// gripper-cmd sub, plus the controller. Block at (0.6, 0), bin at
-    /// (0, 0.6); shoulder z=0.8, l1=l2=0.4 (matches the test fixture).
+    /// Test rig: 4 encoder pubs (Phase 3.4.5b adds J3 wrist), 1 EE pose pub,
+    /// 4 velocity-cmd subs, 1 gripper-cmd sub, plus the controller. Block
+    /// at (0.6, 0), bin at (0, 0.6); shoulder z=0.8, l1=l2=0.4, l3=0.05
+    /// (matches build_pick_and_place_world's Z-Y-Y-Y arm).
     struct Rig {
         c: PickPlace<PortRx<JointEncoderReading>, PortRx<EePoseReading>>,
         enc_txs: Vec<PortTx<JointEncoderReading>>,
@@ -374,10 +431,12 @@ mod pick_place_tests {
         _g_rx: PortRx<GripperCommand>,
     }
 
+    const N_JOINTS: usize = 4;
+
     fn make_rig() -> Rig {
         let mut enc_rxs = Vec::new();
         let mut enc_txs = Vec::new();
-        for _ in 0..3 {
+        for _ in 0..N_JOINTS {
             let (tx, rx) = port::<JointEncoderReading>();
             enc_rxs.push(rx);
             enc_txs.push(tx);
@@ -385,7 +444,7 @@ mod pick_place_tests {
         let (ee_tx, ee_rx) = port::<EePoseReading>();
         let mut vel_txs = Vec::new();
         let mut vel_rxs = Vec::new();
-        for _ in 0..3 {
+        for _ in 0..N_JOINTS {
             let (tx, rx) = port::<JointVelocityCommand>();
             vel_txs.push(tx);
             vel_rxs.push(rx);
@@ -401,6 +460,7 @@ mod pick_place_tests {
             0.8,
             0.4,
             0.4,
+            0.05,
         );
         Rig {
             c,
@@ -411,7 +471,7 @@ mod pick_place_tests {
         }
     }
 
-    fn publish_encoders(rig: &Rig, qs: [f32; 3]) {
+    fn publish_encoders(rig: &Rig, qs: [f32; N_JOINTS]) {
         for (i, q) in qs.iter().enumerate() {
             rig.enc_txs[i].send(JointEncoderReading {
                 joint: JointId(i as u32),
@@ -429,11 +489,18 @@ mod pick_place_tests {
         });
     }
 
+    /// J3 target during ApproachYaw: π/2 so EE +x = world -z (fingers
+    /// already pointing down before descent). Matches the controller's
+    /// hard-coded park value in PickPlaceState::ApproachYaw.
+    fn j3_park() -> f32 {
+        core::f32::consts::FRAC_PI_2
+    }
+
     #[test]
     fn approach_yaw_advances_when_yaw_and_pitches_converged() {
         let mut rig = make_rig();
         publish_ee_xy(&rig, (0.6, 0.0));
-        publish_encoders(&rig, [0.0, 0.0, 0.0]);
+        publish_encoders(&rig, [0.0, 0.0, 0.0, j3_park()]);
         rig.c.step(Time::ZERO).unwrap();
         assert!(matches!(rig.c.state(), PickPlaceState::DescendOverBlock));
     }
@@ -442,7 +509,7 @@ mod pick_place_tests {
     fn approach_yaw_stays_when_yaw_off() {
         let mut rig = make_rig();
         publish_ee_xy(&rig, (0.0, 0.6));
-        publish_encoders(&rig, [0.0, 0.0, 0.0]);
+        publish_encoders(&rig, [0.0, 0.0, 0.0, j3_park()]);
         rig.c.step(Time::ZERO).unwrap();
         assert!(matches!(rig.c.state(), PickPlaceState::ApproachYaw));
     }
@@ -451,11 +518,11 @@ mod pick_place_tests {
     fn descend_over_block_transitions_to_close_when_pitches_converged() {
         let mut rig = make_rig();
         publish_ee_xy(&rig, (0.6, 0.0));
-        publish_encoders(&rig, [0.0, 0.0, 0.0]);
+        publish_encoders(&rig, [0.0, 0.0, 0.0, j3_park()]);
         rig.c.step(Time::ZERO).unwrap();
         assert!(matches!(rig.c.state(), PickPlaceState::DescendOverBlock));
-        let (j1, j2) = rig.c.ik_at_block;
-        publish_encoders(&rig, [0.0, j1, j2]);
+        let (j1, j2, j3) = rig.c.ik_at_block;
+        publish_encoders(&rig, [0.0, j1, j2, j3]);
         rig.c.step(Time::ZERO).unwrap();
         assert!(matches!(rig.c.state(), PickPlaceState::CloseGripper(_)));
     }
@@ -464,10 +531,10 @@ mod pick_place_tests {
     fn close_gripper_transitions_to_ascend_after_hold_ticks() {
         let mut rig = make_rig();
         publish_ee_xy(&rig, (0.6, 0.0));
-        publish_encoders(&rig, [0.0, 0.0, 0.0]);
+        publish_encoders(&rig, [0.0, 0.0, 0.0, j3_park()]);
         rig.c.step(Time::ZERO).unwrap();
-        let (j1, j2) = rig.c.ik_at_block;
-        publish_encoders(&rig, [0.0, j1, j2]);
+        let (j1, j2, j3) = rig.c.ik_at_block;
+        publish_encoders(&rig, [0.0, j1, j2, j3]);
         rig.c.step(Time::ZERO).unwrap();
         assert!(matches!(rig.c.state(), PickPlaceState::CloseGripper(_)));
         for _ in 0..210 {
@@ -480,17 +547,17 @@ mod pick_place_tests {
     fn ascend_transitions_to_yaw_to_bin_when_pitches_converged() {
         let mut rig = make_rig();
         publish_ee_xy(&rig, (0.6, 0.0));
-        publish_encoders(&rig, [0.0, 0.0, 0.0]);
+        publish_encoders(&rig, [0.0, 0.0, 0.0, j3_park()]);
         rig.c.step(Time::ZERO).unwrap();
-        let (j1_at, j2_at) = rig.c.ik_at_block;
-        publish_encoders(&rig, [0.0, j1_at, j2_at]);
+        let (j1_at, j2_at, j3_at) = rig.c.ik_at_block;
+        publish_encoders(&rig, [0.0, j1_at, j2_at, j3_at]);
         rig.c.step(Time::ZERO).unwrap();
         for _ in 0..210 {
             rig.c.step(Time::ZERO).unwrap();
         }
         assert!(matches!(rig.c.state(), PickPlaceState::AscendWithBlock));
-        let (j1_up, j2_up) = rig.c.ik_above_block;
-        publish_encoders(&rig, [0.0, j1_up, j2_up]);
+        let (j1_up, j2_up, j3_up) = rig.c.ik_above_block;
+        publish_encoders(&rig, [0.0, j1_up, j2_up, j3_up]);
         rig.c.step(Time::ZERO).unwrap();
         assert!(matches!(rig.c.state(), PickPlaceState::YawToBin));
     }
@@ -499,21 +566,21 @@ mod pick_place_tests {
     fn yaw_to_bin_transitions_to_open_when_yaw_and_pitches_converged() {
         let mut rig = make_rig();
         publish_ee_xy(&rig, (0.6, 0.0));
-        publish_encoders(&rig, [0.0, 0.0, 0.0]);
+        publish_encoders(&rig, [0.0, 0.0, 0.0, j3_park()]);
         rig.c.step(Time::ZERO).unwrap();
-        let (j1_at, j2_at) = rig.c.ik_at_block;
-        publish_encoders(&rig, [0.0, j1_at, j2_at]);
+        let (j1_at, j2_at, j3_at) = rig.c.ik_at_block;
+        publish_encoders(&rig, [0.0, j1_at, j2_at, j3_at]);
         rig.c.step(Time::ZERO).unwrap();
         for _ in 0..210 {
             rig.c.step(Time::ZERO).unwrap();
         }
-        let (j1_up, j2_up) = rig.c.ik_above_block;
-        publish_encoders(&rig, [0.0, j1_up, j2_up]);
+        let (j1_up, j2_up, j3_up) = rig.c.ik_above_block;
+        publish_encoders(&rig, [0.0, j1_up, j2_up, j3_up]);
         rig.c.step(Time::ZERO).unwrap();
         assert!(matches!(rig.c.state(), PickPlaceState::YawToBin));
         publish_ee_xy(&rig, (0.0, 0.6));
-        let (j1_bin, j2_bin) = rig.c.ik_above_bin;
-        publish_encoders(&rig, [core::f32::consts::FRAC_PI_2, j1_bin, j2_bin]);
+        let (j1_bin, j2_bin, j3_bin) = rig.c.ik_above_bin;
+        publish_encoders(&rig, [core::f32::consts::FRAC_PI_2, j1_bin, j2_bin, j3_bin]);
         rig.c.step(Time::ZERO).unwrap();
         assert!(matches!(rig.c.state(), PickPlaceState::OpenGripper(_)));
     }

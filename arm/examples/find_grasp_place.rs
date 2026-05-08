@@ -18,7 +18,7 @@
 
 use rtf_arm::{
     goals::PlaceInBin,
-    ik::ik_2r,
+    ik::ik_3r,
     ports::{
         EePoseReading, GripperCommand, JointEncoderReading, JointId, JointVelocityCommand,
         PressureReading,
@@ -69,6 +69,10 @@ const PARK_Z: f32 = 0.85;
 /// Ticks to hold the gripper closed before transitioning to Ascend.
 /// Matches PickPlace.
 const CLOSE_HOLD_TICKS: u32 = 200;
+/// Phase 3.4.5c: cumulative chain pitch the controller drives (J1+J2+J3)
+/// to keep EE +x = world -z (fingers protruding straight down). Per
+/// `ik_3r`'s "+α-rotates-+x-toward-`-z`" convention, this is +π/2.
+const TARGET_WRIST_PITCH: f32 = core::f32::consts::FRAC_PI_2;
 /// Ticks to hold the gripper open before transitioning to Done.
 /// Matches PickPlace.
 const OPEN_HOLD_TICKS: u32 = 200;
@@ -80,10 +84,11 @@ where
     Pr: PortReader<PressureReading>,
 {
     state: SearchAndPlaceState,
-    /// Pre-computed (J0, J1, J2) joint targets in serpentine order over the
-    /// search region at fixed sweep altitude. Constructor-computed so the
-    /// hot path doesn't run IK per tick.
-    sweep_waypoints: Vec<(f32, f32, f32)>,
+    /// Pre-computed (J0, J1, J2, J3) joint targets in serpentine order over
+    /// the search region at fixed sweep altitude. Constructor-computed so
+    /// the hot path doesn't run IK per tick. Phase 3.4.5c: J3 keeps EE +x
+    /// pointing world -z (fingers down) at every sweep waypoint.
+    sweep_waypoints: Vec<(f32, f32, f32, f32)>,
     sweep_idx: usize,
     /// EE xy at the running max-pressure moment seen so far. Cheap form of
     /// peak-tracking: instead of descending at the FIRST sample above
@@ -100,6 +105,9 @@ where
     arm_shoulder_z: f32,
     l1: f32,
     l2: f32,
+    /// Phase 3.4.5b: wrist link length, fed to ik_3r so the wrist J3 is
+    /// driven to keep EE +x = world -z (fingers pointing down).
+    l3: f32,
     encoder_rxs: Vec<R>,
     ee_pose_rx: P,
     pressure_rx: Pr,
@@ -136,16 +144,18 @@ where
         arm_shoulder_z: f32,
         l1: f32,
         l2: f32,
+        l3: f32,
     ) -> Self {
         let xy_waypoints = serpentine_waypoints(region_x, region_y, stripe_dy);
-        let sweep_waypoints: Vec<(f32, f32, f32)> = xy_waypoints
+        let target_pitch = TARGET_WRIST_PITCH;
+        let sweep_waypoints: Vec<(f32, f32, f32, f32)> = xy_waypoints
             .iter()
             .map(|&(x, y)| {
                 let r = (x * x + y * y).sqrt();
-                let (j1, j2) = ik_2r(r, sweep_z - arm_shoulder_z, l1, l2)
+                let (j1, j2, j3) = ik_3r(r, sweep_z - arm_shoulder_z, target_pitch, l1, l2, l3)
                     .expect("sweep waypoint unreachable — check region vs arm reach");
                 let yaw = y.atan2(x);
-                (yaw, j1, j2)
+                (yaw, j1, j2, j3)
             })
             .collect();
         Self {
@@ -160,6 +170,7 @@ where
             arm_shoulder_z,
             l1,
             l2,
+            l3,
             encoder_rxs,
             ee_pose_rx,
             pressure_rx,
@@ -185,12 +196,17 @@ where
         Some((r.pose.translation.x, r.pose.translation.y))
     }
 
-    /// Send a per-joint velocity command driving (q0, q1, q2) toward the
-    /// supplied target via P-on-position with kp=4.0, clamped to ±2 rad/s
-    /// (matches PickPlace's gain choices).
-    fn drive_joints_toward(&mut self, target: (f32, f32, f32)) {
+    /// Send a per-joint velocity command driving (q0, q1, q2, q3) toward
+    /// the supplied target via P-on-position with kp=4.0, clamped to
+    /// ±2 rad/s (matches PickPlace's gain choices).
+    fn drive_joints_toward(&mut self, target: (f32, f32, f32, f32)) {
         let qs = self.joint_qs();
-        for (i, t) in [(0usize, target.0), (1, target.1), (2, target.2)] {
+        for (i, t) in [
+            (0usize, target.0),
+            (1, target.1),
+            (2, target.2),
+            (3, target.3),
+        ] {
             if i >= self.velocity_txs.len() {
                 break;
             }
@@ -212,27 +228,38 @@ where
         }
     }
 
-    /// True iff every joint is within `joint_tol` of the corresponding target.
-    fn joints_converged_to(&self, target: (f32, f32, f32)) -> bool {
+    /// True iff every joint (J0-J3) is within `joint_tol` of its target.
+    fn joints_converged_to(&self, target: (f32, f32, f32, f32)) -> bool {
         let qs = self.joint_qs();
         let q0 = qs.first().copied().unwrap_or(0.0);
         let q1 = qs.get(1).copied().unwrap_or(0.0);
         let q2 = qs.get(2).copied().unwrap_or(0.0);
+        let q3 = qs.get(3).copied().unwrap_or(0.0);
         (q0 - target.0).abs() < self.joint_tol
             && (q1 - target.1).abs() < self.joint_tol
             && (q2 - target.2).abs() < self.joint_tol
+            && (q3 - target.3).abs() < self.joint_tol
     }
 
-    /// Compute (J0, J1, J2) joint target for an EE world xy at altitude `z`.
-    /// J0 is yaw = atan2(y, x); J1, J2 come from the closed-form 2R IK on
-    /// the radial-z plane. Panics on unreachable targets — every call site
-    /// here uses pre-validated geometry (within search region or the bin).
-    fn ik_target_for(&self, xy: (f32, f32), z: f32) -> (f32, f32, f32) {
+    /// Compute (J0, J1, J2, J3) joint target for an EE world xy at
+    /// altitude `z`. J0 is yaw = atan2(y, x); (J1, J2, J3) come from
+    /// `ik_3r` on the radial-z plane with cumulative pitch =
+    /// `TARGET_WRIST_PITCH` (EE +x = world -z, fingers down). Panics on
+    /// unreachable targets — every call site here uses pre-validated
+    /// geometry (within search region or the bin).
+    fn ik_target_for(&self, xy: (f32, f32), z: f32) -> (f32, f32, f32, f32) {
         let (x, y) = xy;
         let r = (x * x + y * y).sqrt();
-        let (j1, j2) = ik_2r(r, z - self.arm_shoulder_z, self.l1, self.l2)
-            .expect("post-contact IK target unreachable — check geometry");
-        (y.atan2(x), j1, j2)
+        let (j1, j2, j3) = ik_3r(
+            r,
+            z - self.arm_shoulder_z,
+            TARGET_WRIST_PITCH,
+            self.l1,
+            self.l2,
+            self.l3,
+        )
+        .expect("post-contact IK target unreachable — check geometry");
+        (y.atan2(x), j1, j2, j3)
     }
 }
 
@@ -414,6 +441,7 @@ fn run_one_seed_with(
         /* arm_shoulder_z */ 0.8,
         /* l1 */ 0.4,
         /* l2 */ 0.4,
+        /* l3 (wrist link, Phase 3.4.5b) */ 0.05,
     );
     let goal = PlaceInBin::new(block, bin);
     let cfg = RunConfig::default()
@@ -539,7 +567,7 @@ mod search_and_place_tests {
     fn make_rig_with(stripe_dy: f32) -> Rig {
         let mut enc_rxs = Vec::new();
         let mut enc_txs = Vec::new();
-        for _ in 0..3 {
+        for _ in 0..N_JOINTS {
             let (tx, rx) = port::<JointEncoderReading>();
             enc_rxs.push(rx);
             enc_txs.push(tx);
@@ -548,7 +576,7 @@ mod search_and_place_tests {
         let (pressure_tx, pressure_rx) = port::<PressureReading>();
         let mut vel_txs = Vec::new();
         let mut vel_rxs = Vec::new();
-        for _ in 0..3 {
+        for _ in 0..N_JOINTS {
             let (tx, rx) = port::<JointVelocityCommand>();
             vel_txs.push(tx);
             vel_rxs.push(rx);
@@ -568,6 +596,7 @@ mod search_and_place_tests {
             /* arm_shoulder_z */ 0.8,
             /* l1 */ 0.4,
             /* l2 */ 0.4,
+            /* l3 */ 0.05,
         );
         Rig {
             c,
@@ -579,11 +608,15 @@ mod search_and_place_tests {
         }
     }
 
+    /// Phase 3.4.5b: 4-joint arm (Z-Y-Y-Y) — encoder/velocity ports must
+    /// match build_search_world's spec.
+    const N_JOINTS: usize = 4;
+
     fn make_rig() -> Rig {
         make_rig_with(0.05)
     }
 
-    fn publish_encoders(rig: &Rig, qs: [f32; 3]) {
+    fn publish_encoders(rig: &Rig, qs: [f32; N_JOINTS]) {
         for (i, q) in qs.iter().enumerate() {
             rig.enc_txs[i].send(JointEncoderReading {
                 joint: JointId(i as u32),
@@ -631,7 +664,7 @@ mod search_and_place_tests {
         let mut rig = make_rig();
         let wp0 = rig.c.sweep_waypoints[0];
         // Pretend joints have converged exactly to wp0.
-        publish_encoders(&rig, [wp0.0, wp0.1, wp0.2]);
+        publish_encoders(&rig, [wp0.0, wp0.1, wp0.2, wp0.3]);
         publish_ee_xy(&rig, (0.4, -0.25));
         publish_pressure(&rig, 0.0);
         let idx_before = rig.c.sweep_idx;
@@ -643,7 +676,7 @@ mod search_and_place_tests {
     #[test]
     fn sweep_transitions_to_descend_after_pressure_peak_falls_off() {
         let mut rig = make_rig();
-        publish_encoders(&rig, [0.0, 0.0, 0.0]);
+        publish_encoders(&rig, [0.0, 0.0, 0.0, super::TARGET_WRIST_PITCH]);
         // Tick 1: EE over the block at xy=(0.55, 0.10), pressure peaks
         // at 0.6. Peak gets recorded, but commit waits for pressure to
         // fall back below threshold.
@@ -672,7 +705,7 @@ mod search_and_place_tests {
         // Force convergence to each waypoint in turn.
         for _ in 0..n {
             let wp = rig.c.sweep_waypoints[rig.c.sweep_idx];
-            publish_encoders(&rig, [wp.0, wp.1, wp.2]);
+            publish_encoders(&rig, [wp.0, wp.1, wp.2, wp.3]);
             publish_ee_xy(&rig, (0.5, 0.0));
             publish_pressure(&rig, 0.0);
             rig.c.step(Time::ZERO).unwrap();
@@ -685,7 +718,7 @@ mod search_and_place_tests {
     /// past the block and pressure back to 0 to commit the descent.
     fn rig_at_descend(contact_xy: (f32, f32)) -> Rig {
         let mut rig = make_rig();
-        publish_encoders(&rig, [0.0, 0.0, 0.0]);
+        publish_encoders(&rig, [0.0, 0.0, 0.0, super::TARGET_WRIST_PITCH]);
         // Peak: EE at contact_xy with pressure above threshold.
         publish_ee_xy(&rig, contact_xy);
         publish_pressure(&rig, 0.6);
@@ -709,7 +742,7 @@ mod search_and_place_tests {
         let mut rig = rig_at_descend(cxy);
         let target = rig.c.ik_target_for(cxy, GRASP_Z);
         // Report joints at the descend target.
-        publish_encoders(&rig, [target.0, target.1, target.2]);
+        publish_encoders(&rig, [target.0, target.1, target.2, target.3]);
         publish_ee_xy(&rig, cxy);
         publish_pressure(&rig, 0.6);
         rig.c.step(Time::ZERO).unwrap();
@@ -724,7 +757,7 @@ mod search_and_place_tests {
         let cxy = (0.55, 0.10);
         let mut rig = rig_at_descend(cxy);
         let target = rig.c.ik_target_for(cxy, GRASP_Z);
-        publish_encoders(&rig, [target.0, target.1, target.2]);
+        publish_encoders(&rig, [target.0, target.1, target.2, target.3]);
         rig.c.step(Time::ZERO).unwrap();
         assert!(matches!(
             rig.c.state(),
@@ -747,7 +780,15 @@ mod search_and_place_tests {
         let mut rig = rig_at_descend(cxy);
         // March to AscendWithBlock.
         let descend_target = rig.c.ik_target_for(cxy, GRASP_Z);
-        publish_encoders(&rig, [descend_target.0, descend_target.1, descend_target.2]);
+        publish_encoders(
+            &rig,
+            [
+                descend_target.0,
+                descend_target.1,
+                descend_target.2,
+                descend_target.3,
+            ],
+        );
         rig.c.step(Time::ZERO).unwrap();
         for _ in 0..(super::CLOSE_HOLD_TICKS + 10) {
             rig.c.step(Time::ZERO).unwrap();
@@ -758,7 +799,15 @@ mod search_and_place_tests {
         ));
         // Now report convergence at the ascend target.
         let ascend_target = rig.c.ik_target_for(cxy, super::PARK_Z);
-        publish_encoders(&rig, [ascend_target.0, ascend_target.1, ascend_target.2]);
+        publish_encoders(
+            &rig,
+            [
+                ascend_target.0,
+                ascend_target.1,
+                ascend_target.2,
+                ascend_target.3,
+            ],
+        );
         rig.c.step(Time::ZERO).unwrap();
         assert!(matches!(rig.c.state(), SearchAndPlaceState::YawToBin));
     }
@@ -769,18 +818,37 @@ mod search_and_place_tests {
         let mut rig = rig_at_descend(cxy);
         // March to YawToBin.
         let descend_target = rig.c.ik_target_for(cxy, GRASP_Z);
-        publish_encoders(&rig, [descend_target.0, descend_target.1, descend_target.2]);
+        publish_encoders(
+            &rig,
+            [
+                descend_target.0,
+                descend_target.1,
+                descend_target.2,
+                descend_target.3,
+            ],
+        );
         rig.c.step(Time::ZERO).unwrap();
         for _ in 0..(super::CLOSE_HOLD_TICKS + 10) {
             rig.c.step(Time::ZERO).unwrap();
         }
         let ascend_target = rig.c.ik_target_for(cxy, super::PARK_Z);
-        publish_encoders(&rig, [ascend_target.0, ascend_target.1, ascend_target.2]);
+        publish_encoders(
+            &rig,
+            [
+                ascend_target.0,
+                ascend_target.1,
+                ascend_target.2,
+                ascend_target.3,
+            ],
+        );
         rig.c.step(Time::ZERO).unwrap();
         assert!(matches!(rig.c.state(), SearchAndPlaceState::YawToBin));
         // Report joints at the bin target.
         let bin_target = rig.c.ik_target_for((0.0, 0.6), super::PARK_Z);
-        publish_encoders(&rig, [bin_target.0, bin_target.1, bin_target.2]);
+        publish_encoders(
+            &rig,
+            [bin_target.0, bin_target.1, bin_target.2, bin_target.3],
+        );
         rig.c.step(Time::ZERO).unwrap();
         assert!(matches!(rig.c.state(), SearchAndPlaceState::OpenGripper(_)));
     }
@@ -791,16 +859,35 @@ mod search_and_place_tests {
         let mut rig = rig_at_descend(cxy);
         // March all the way to OpenGripper(0).
         let descend_target = rig.c.ik_target_for(cxy, GRASP_Z);
-        publish_encoders(&rig, [descend_target.0, descend_target.1, descend_target.2]);
+        publish_encoders(
+            &rig,
+            [
+                descend_target.0,
+                descend_target.1,
+                descend_target.2,
+                descend_target.3,
+            ],
+        );
         rig.c.step(Time::ZERO).unwrap();
         for _ in 0..(super::CLOSE_HOLD_TICKS + 10) {
             rig.c.step(Time::ZERO).unwrap();
         }
         let ascend_target = rig.c.ik_target_for(cxy, super::PARK_Z);
-        publish_encoders(&rig, [ascend_target.0, ascend_target.1, ascend_target.2]);
+        publish_encoders(
+            &rig,
+            [
+                ascend_target.0,
+                ascend_target.1,
+                ascend_target.2,
+                ascend_target.3,
+            ],
+        );
         rig.c.step(Time::ZERO).unwrap();
         let bin_target = rig.c.ik_target_for((0.0, 0.6), super::PARK_Z);
-        publish_encoders(&rig, [bin_target.0, bin_target.1, bin_target.2]);
+        publish_encoders(
+            &rig,
+            [bin_target.0, bin_target.1, bin_target.2, bin_target.3],
+        );
         rig.c.step(Time::ZERO).unwrap();
         assert!(matches!(rig.c.state(), SearchAndPlaceState::OpenGripper(_)));
         // Hold open for >= OPEN_HOLD_TICKS.

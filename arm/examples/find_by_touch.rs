@@ -34,7 +34,7 @@
 
 use rtf_arm::{
     goals::PlaceInBin,
-    ik::ik_2r,
+    ik::ik_3r,
     ports::{
         ArmContactReading, EePoseReading, GripperCommand, JointEncoderReading, JointId,
         JointTorqueReading, JointVelocityCommand,
@@ -77,6 +77,9 @@ const GRASP_Z: f32 = 0.55;
 const PARK_Z: f32 = 0.85;
 const CLOSE_HOLD_TICKS: u32 = 200;
 const OPEN_HOLD_TICKS: u32 = 200;
+/// Phase 3.4.5c: cumulative chain pitch the controller drives (J1+J2+J3)
+/// to keep EE +x = world -z (fingers protruding straight down).
+const TARGET_WRIST_PITCH: f32 = core::f32::consts::FRAC_PI_2;
 
 #[allow(dead_code)]
 pub struct FindByTouch<R, P, T, C>
@@ -87,7 +90,7 @@ where
     C: PortReader<ArmContactReading>,
 {
     state: FbtState,
-    sweep_waypoints: Vec<(f32, f32, f32)>,
+    sweep_waypoints: Vec<(f32, f32, f32, f32)>,
     sweep_idx: usize,
     contact_xy: Option<(f32, f32)>,
     /// EE xy captured at the trigger tick, held constant during BackOffUp
@@ -103,6 +106,8 @@ where
     arm_shoulder_z: f32,
     l1: f32,
     l2: f32,
+    /// Phase 3.4.5b: wrist link length, fed to ik_3r.
+    l3: f32,
     encoder_rxs: Vec<R>,
     ee_pose_rx: P,
     /// One torque receiver per joint. Indexed by joint slot.
@@ -139,16 +144,18 @@ where
         arm_shoulder_z: f32,
         l1: f32,
         l2: f32,
+        l3: f32,
     ) -> Self {
         let xy_waypoints = serpentine_waypoints(region_x, region_y, stripe_dy);
-        let sweep_waypoints: Vec<(f32, f32, f32)> = xy_waypoints
+        let sweep_waypoints: Vec<(f32, f32, f32, f32)> = xy_waypoints
             .iter()
             .map(|&(x, y)| {
                 let r = (x * x + y * y).sqrt();
-                let (j1, j2) = ik_2r(r, sweep_z - arm_shoulder_z, l1, l2)
-                    .expect("sweep waypoint unreachable — check region vs arm reach");
+                let (j1, j2, j3) =
+                    ik_3r(r, sweep_z - arm_shoulder_z, TARGET_WRIST_PITCH, l1, l2, l3)
+                        .expect("sweep waypoint unreachable — check region vs arm reach");
                 let yaw = y.atan2(x);
-                (yaw, j1, j2)
+                (yaw, j1, j2, j3)
             })
             .collect();
         Self {
@@ -162,6 +169,7 @@ where
             arm_shoulder_z,
             l1,
             l2,
+            l3,
             encoder_rxs,
             ee_pose_rx,
             torque_rxs,
@@ -196,13 +204,18 @@ where
             .fold(0.0_f32, f32::max)
     }
 
-    fn drive_joints_toward(&mut self, target: (f32, f32, f32)) {
+    fn drive_joints_toward(&mut self, target: (f32, f32, f32, f32)) {
         self.drive_joints_toward_with_clamp(target, 2.0);
     }
 
-    fn drive_joints_toward_with_clamp(&mut self, target: (f32, f32, f32), clamp: f32) {
+    fn drive_joints_toward_with_clamp(&mut self, target: (f32, f32, f32, f32), clamp: f32) {
         let qs = self.joint_qs();
-        for (i, t) in [(0usize, target.0), (1, target.1), (2, target.2)] {
+        for (i, t) in [
+            (0usize, target.0),
+            (1, target.1),
+            (2, target.2),
+            (3, target.3),
+        ] {
             if i >= self.velocity_txs.len() {
                 break;
             }
@@ -224,22 +237,31 @@ where
         }
     }
 
-    fn joints_converged_to(&self, target: (f32, f32, f32)) -> bool {
+    fn joints_converged_to(&self, target: (f32, f32, f32, f32)) -> bool {
         let qs = self.joint_qs();
         let q0 = qs.first().copied().unwrap_or(0.0);
         let q1 = qs.get(1).copied().unwrap_or(0.0);
         let q2 = qs.get(2).copied().unwrap_or(0.0);
+        let q3 = qs.get(3).copied().unwrap_or(0.0);
         (q0 - target.0).abs() < self.joint_tol
             && (q1 - target.1).abs() < self.joint_tol
             && (q2 - target.2).abs() < self.joint_tol
+            && (q3 - target.3).abs() < self.joint_tol
     }
 
-    fn ik_target_for(&self, xy: (f32, f32), z: f32) -> (f32, f32, f32) {
+    fn ik_target_for(&self, xy: (f32, f32), z: f32) -> (f32, f32, f32, f32) {
         let (x, y) = xy;
         let r = (x * x + y * y).sqrt();
-        let (j1, j2) = ik_2r(r, z - self.arm_shoulder_z, self.l1, self.l2)
-            .expect("post-contact IK target unreachable — check geometry");
-        (y.atan2(x), j1, j2)
+        let (j1, j2, j3) = ik_3r(
+            r,
+            z - self.arm_shoulder_z,
+            TARGET_WRIST_PITCH,
+            self.l1,
+            self.l2,
+            self.l3,
+        )
+        .expect("post-contact IK target unreachable — check geometry");
+        (y.atan2(x), j1, j2, j3)
     }
 }
 
@@ -439,8 +461,8 @@ fn run_one_seed_with(seed: u64, rrd_name: &str, debug_overlay: bool) -> rtf_harn
     }
     let ports = world.attach_standard_arm_ports();
     let ee_pose_rx = world.attach_ee_pose_sensor(RateHz::new(1000));
-    // One torque receiver per joint.
-    let torque_rxs: Vec<_> = (0..3)
+    // One torque receiver per joint (Phase 3.4.5b: 4 joints with the wrist).
+    let torque_rxs: Vec<_> = (0..4)
         .map(|i| world.attach_joint_torque_sensor(JointId(i as u32), RateHz::new(1000)))
         .collect();
     let contact_rx = world.attach_arm_contact_sensor(RateHz::new(1000));
@@ -462,6 +484,7 @@ fn run_one_seed_with(seed: u64, rrd_name: &str, debug_overlay: bool) -> rtf_harn
         /* arm_shoulder_z */ 0.8,
         /* l1 */ 0.4,
         /* l2 */ 0.4,
+        /* l3 (wrist link, Phase 3.4.5b) */ 0.05,
     );
     let goal = PlaceInBin::new(block, bin);
     let cfg = RunConfig::default()
