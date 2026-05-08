@@ -18,6 +18,12 @@ rerun = { version = "0.21", default-features = false, features = ["sdk"] }
 # `DebugRenderPipeline` used by Phase 2's overlay. `parallel` is
 # intentionally OFF — the rayon-driven steps are non-deterministic per
 # design v2 §10.
+#
+# `simd-stable` not enabled: confirmed empirically (2026-05-08) that
+# SIMD math diverges from scalar enough to break sensitive seed tests
+# (e.g., continuous_spawn_seed_42 went from 0.99 to 0.33). Determinism
+# between runs of the same binary holds, but determinism vs scalar
+# baseline does not.
 rapier3d = { version = "0.21", features = ["serde-serialize", "debug-render"] }
 
 [workspace.lints.clippy]
