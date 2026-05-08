@@ -421,6 +421,12 @@ impl ArmWorld {
             }
             let mut spawn = self.pending_spawns.pop_front().unwrap();
             spawn.template.id = self.scene.allocate_object_id();
+            // Rapier mirror: every domain Object that lives in the
+            // scene must also have a body in PhysicsWorld so the next
+            // step() picks it up. Done before scene.insert_object so we
+            // can pass the canonical &Object reference.
+            #[cfg(feature = "physics-rapier")]
+            self.physics.insert_object(&spawn.template);
             self.scene.insert_object(spawn.template);
         }
     }
@@ -1400,5 +1406,71 @@ mod tests {
             .collect();
         xs.sort_by(f32::total_cmp);
         assert_eq!(xs, vec![0.10, 0.20, 0.30]);
+    }
+
+    #[cfg(feature = "physics-rapier")]
+    #[test]
+    fn scheduled_spawn_creates_rapier_body() {
+        // Schedule a spawn at t=10 ms, step past it, assert the
+        // physics world now has a body for the new object.
+        let mut world = ArmWorld::new(Scene::new(0), simple_spec(), false);
+        let n_initial_bodies = world.physics().body_count();
+        world.schedule_spawn(Time::from_millis(10), block_template());
+        // Step past the due time.
+        world.consume_actuators_and_integrate_inner(Duration::from_millis(15));
+        // The newly-inserted scene object should also have a body.
+        let (id, _) = world.scene.objects().next().expect("object inserted");
+        assert!(
+            world.physics().object_handle(*id).is_some(),
+            "spawned object {id:?} has no Rapier body"
+        );
+        assert_eq!(world.physics().body_count(), n_initial_bodies + 1);
+    }
+
+    #[cfg(feature = "physics-rapier")]
+    #[test]
+    fn spawned_object_falls_when_above_ground() {
+        // Schedule a spawn at z=1.0 above an empty scene with a flat
+        // fixture at z=0; step for 1 s; the object should land near
+        // z=fixture_top + half-height.
+        use nalgebra::{Isometry3, Vector3};
+        use rtf_sim::fixture::Fixture;
+        use rtf_sim::shape::Shape;
+
+        let mut scene = Scene::new(0);
+        scene.add_fixture(Fixture {
+            id: 0,
+            pose: Isometry3::translation(0.0, 0.0, -0.05),
+            shape: Shape::Aabb {
+                half_extents: Vector3::new(2.0, 2.0, 0.05),
+            },
+            is_support: true,
+        });
+        let mut world = ArmWorld::new(scene, simple_spec(), /* gravity */ true);
+
+        let mut template = block_template();
+        // Override z to 1.0 so the spawn drops onto the fixture top at z=0.
+        template.pose = Isometry3::translation(0.0, 0.0, 1.0);
+        world.schedule_spawn(Time::from_millis(0), template);
+
+        // First step fires the spawn.
+        world.consume_actuators_and_integrate_inner(Duration::from_millis(1));
+        let id = *world.scene.objects().next().expect("object inserted").0;
+        let h = world.physics().object_handle(id).unwrap();
+        assert_eq!(
+            world.physics().body_type(h),
+            Some(rtf_sim::physics::world::RigidBodyType::Dynamic),
+            "spawn should be Dynamic"
+        );
+        let initial_z = world.scene.object(id).unwrap().pose.translation.z;
+        // 2 s more of stepping; gravity pulls.
+        for _ in 0..2000 {
+            world.consume_actuators_and_integrate_inner(Duration::from_millis(1));
+        }
+        let final_z = world.scene.object(id).unwrap().pose.translation.z;
+        assert!(
+            final_z < initial_z - 0.5,
+            "expected substantial fall; initial z={initial_z}, final z={final_z}"
+        );
     }
 }
