@@ -49,10 +49,20 @@ pub enum SearchAndPlaceState {
     /// pressure signal exceeds threshold. Wrist-level keeps the fingers
     /// from bulldozing the block during the localization sweep.
     Sweeping,
-    /// Post-detection retract: pull the EE radially inward (toward the
-    /// shoulder) AND a few cm up so neither the wrist link arc nor the
-    /// finger pillars touch the block while J3 swings through 90°.
-    /// Target is `(contact_xy * RETRACT_FACTOR, scan_z + APPROACH_DZ)`
+    /// Step 4.1.1: second-pass fine-grained localization. After the
+    /// coarse sweep records a peak that's only as accurate as the
+    /// coarse stripe spacing (5 cm in y), drive a small fine raster
+    /// (2 cm dy stripes, ±6 cm in y, ±6 cm in x) centred on
+    /// `coarse_peak_xy` while accumulating a fresh weighted centroid.
+    /// The denser raster ensures the actual block is within 1 cm of
+    /// some stripe, so the centroid converges close to the block's
+    /// true xy. Commits to `LiftAndRetract` once the fine raster is
+    /// exhausted.
+    LocalizeFineSweep,
+    /// Post-localization retract: pull the EE radially inward (toward
+    /// the shoulder) AND a few cm up so neither the wrist link arc
+    /// nor the finger pillars touch the block while J3 swings through
+    /// 90°. Target is `(contact_xy * RETRACT_FACTOR, scan_z + APPROACH_DZ)`
     /// at scan-pose pitch (wrist still level, J3 unchanged).
     LiftAndRetract,
     /// Pressure peak settled; J0/J1/J2 hold the retracted scan-pose
@@ -121,6 +131,23 @@ const RETRACT_FACTOR: f32 = 0.70;
 /// of slew). 600 ticks @ 1 ms gives the rotation 600 ms to complete +
 /// settle within `joint_tol`.
 const ROTATE_WRIST_TICKS: u32 = 600;
+/// Step 4.1.1: fine-raster stripe spacing (m). Tighter than the
+/// coarse `stripe_dy=0.05` so any block is within 1 cm of some
+/// stripe, eliminating the off-stripe localization bias that the
+/// coarse-only weighted centroid suffers from.
+const FINE_STRIPE_DY: f32 = 0.02;
+/// Step 4.1.1: fine-raster y half-range (m) around the coarse peak.
+/// 6 cm covers ±1 coarse-stripe spacing (5 cm) plus 1 cm slack on
+/// each side, ensuring the true block is captured even if the
+/// coarse peak xy is off by a coarse-stripe width.
+const FINE_HALF_RANGE_Y: f32 = 0.06;
+/// Step 4.1.1: fine-raster x half-range (m) per stripe around the
+/// coarse peak. The coarse sweep moves at 30 cm/stripe along x, so
+/// the coarse peak xy can be off by several cm in x too (the
+/// pressure peak fires once the EE leaves the contact zone, so the
+/// recorded x is biased into the EE-direction-of-travel). 6 cm
+/// matches the y range and covers typical x offsets.
+const FINE_HALF_RANGE_X: f32 = 0.06;
 /// Ticks to hold the gripper open before transitioning to Done.
 /// Matches PickPlace.
 const OPEN_HOLD_TICKS: u32 = 200;
@@ -159,12 +186,25 @@ where
     /// localizes to the y-midpoint of those stripes rather than
     /// snapping to whichever stripe happened to register the
     /// fractionally higher peak. Improves grasp accuracy for
-    /// off-stripe blocks (seed 1337 corner case).
+    /// off-stripe blocks (seed 1337 corner case). Step 4.1.1: zeroed
+    /// on entry to `LocalizeFineSweep` so the fine-raster centroid
+    /// is independent of the coarse-sweep contributions.
     pressure_weighted_xy: (f64, f64),
     pressure_weight_sum: f64,
     /// Last known max pressure — kept only for the threshold-fall-off
     /// commit logic (`peak > threshold && current < threshold` → commit).
     peak_pressure: f32,
+    /// Step 4.1.1: coarse-sweep peak xy. Set on Sweeping →
+    /// LocalizeFineSweep transition and used as the centre of the
+    /// fine raster.
+    coarse_peak_xy: Option<(f32, f32)>,
+    /// Step 4.1.1: fine-raster waypoint xy *offsets* relative to
+    /// `coarse_peak_xy`. Pre-computed at construction (just a small
+    /// serpentine in (x_offset, y_offset) space). The current target
+    /// xy in world frame is `coarse_peak_xy + fine_raster_offsets[fine_idx]`,
+    /// re-IK'd each tick (cheap; just a handful of waypoints).
+    fine_raster_offsets: Vec<(f32, f32)>,
+    fine_idx: usize,
     /// Final commit position for descent (= peak_xy at transition time).
     contact_xy: Option<(f32, f32)>,
     target_bin_xy: (f32, f32),
@@ -229,6 +269,11 @@ where
                 (yaw, j1, j2, j3)
             })
             .collect();
+        let fine_raster_offsets = serpentine_waypoints(
+            (-FINE_HALF_RANGE_X, FINE_HALF_RANGE_X),
+            (-FINE_HALF_RANGE_Y, FINE_HALF_RANGE_Y),
+            FINE_STRIPE_DY,
+        );
         Self {
             state: SearchAndPlaceState::LiftToScanAltitude,
             scan_waypoints,
@@ -238,6 +283,9 @@ where
             pressure_weighted_xy: (0.0, 0.0),
             pressure_weight_sum: 0.0,
             peak_pressure: 0.0,
+            coarse_peak_xy: None,
+            fine_raster_offsets,
+            fine_idx: 0,
             contact_xy: None,
             target_bin_xy,
             pressure_threshold: 0.2,
@@ -409,19 +457,28 @@ where
                     }
                 }
 
-                // Commit to wrist rotation once we've seen a peak above
-                // threshold AND pressure has fallen back below threshold
-                // (i.e. we've already crossed the block's contact zone —
-                // the centroid is now our best block-position estimate).
+                // Step 4.1.1: when the coarse sweep finishes a contact
+                // event (peak above threshold, pressure now below),
+                // hand off to LocalizeFineSweep with the coarse
+                // centroid as the centre of the fine raster. The
+                // coarse centroid is precise enough to seed a fine
+                // raster ±6 cm around it; the fine raster's denser
+                // 2 cm stripes then refine xy to ~1 cm accuracy.
                 if self.peak_pressure > self.pressure_threshold
                     && pressure < self.pressure_threshold
                     && self.pressure_weight_sum > 0.0
                 {
                     let cx = (self.pressure_weighted_xy.0 / self.pressure_weight_sum) as f32;
                     let cy = (self.pressure_weighted_xy.1 / self.pressure_weight_sum) as f32;
-                    self.contact_xy = Some((cx, cy));
-                    self.rotate_wrist_n = 0;
-                    self.state = SearchAndPlaceState::LiftAndRetract;
+                    self.coarse_peak_xy = Some((cx, cy));
+                    // Reset accumulators for a fresh fine-raster
+                    // centroid; reset peak so the fine state's
+                    // post-fine-sweep diagnostics use fine peak.
+                    self.pressure_weighted_xy = (0.0, 0.0);
+                    self.pressure_weight_sum = 0.0;
+                    self.peak_pressure = 0.0;
+                    self.fine_idx = 0;
+                    self.state = SearchAndPlaceState::LocalizeFineSweep;
                     self.halt_joints();
                     return Ok(());
                 }
@@ -434,6 +491,60 @@ where
                         self.state = SearchAndPlaceState::Failed;
                         self.halt_joints();
                     }
+                }
+            }
+            SearchAndPlaceState::LocalizeFineSweep => {
+                // Walk a small dense raster centred on coarse_peak_xy
+                // (set on Sweeping → LocalizeFineSweep transition).
+                // Same scan pose (wrist level), same scan_z, just
+                // tighter stripe spacing. Accumulate a fresh
+                // pressure-weighted centroid; commit it once the
+                // entire raster is exhausted.
+                let centre = self
+                    .coarse_peak_xy
+                    .expect("coarse_peak_xy set on Sweeping exit");
+
+                if pressure > self.pressure_threshold {
+                    if let Some((x, y)) = self.ee_xy() {
+                        let p = pressure as f64;
+                        self.pressure_weighted_xy.0 += p * x as f64;
+                        self.pressure_weighted_xy.1 += p * y as f64;
+                        self.pressure_weight_sum += p;
+                    }
+                    if pressure > self.peak_pressure {
+                        self.peak_pressure = pressure;
+                    }
+                }
+
+                // Raster exhausted → commit centroid and proceed.
+                // Fall back to coarse_peak_xy if the fine raster
+                // didn't see anything (block displaced during
+                // earlier interaction, or coarse peak was a phantom).
+                if self.fine_idx >= self.fine_raster_offsets.len() {
+                    let final_xy = if self.pressure_weight_sum > 0.0 {
+                        (
+                            (self.pressure_weighted_xy.0 / self.pressure_weight_sum) as f32,
+                            (self.pressure_weighted_xy.1 / self.pressure_weight_sum) as f32,
+                        )
+                    } else {
+                        centre
+                    };
+                    self.contact_xy = Some(final_xy);
+                    self.rotate_wrist_n = 0;
+                    self.state = SearchAndPlaceState::LiftAndRetract;
+                    self.halt_joints();
+                    return Ok(());
+                }
+
+                let (dx, dy) = self.fine_raster_offsets[self.fine_idx];
+                let target = self.ik_target_with_pitch(
+                    (centre.0 + dx, centre.1 + dy),
+                    self.scan_z,
+                    SCAN_WRIST_PITCH,
+                );
+                self.drive_joints_toward(target);
+                if self.joints_converged_to(target) {
+                    self.fine_idx += 1;
                 }
             }
             SearchAndPlaceState::LiftAndRetract => {
@@ -883,7 +994,7 @@ mod search_and_place_tests {
     }
 
     #[test]
-    fn sweep_transitions_to_lift_and_retract_after_pressure_peak_falls_off() {
+    fn sweep_transitions_to_localize_fine_sweep_after_pressure_peak_falls_off() {
         let mut rig = make_rig();
         enter_sweeping(&mut rig);
         // Tick 1: EE over the block at xy=(0.55, 0.10), pressure peaks
@@ -895,15 +1006,19 @@ mod search_and_place_tests {
         rig.c.step(Time::ZERO).unwrap();
         assert!(matches!(rig.c.state(), SearchAndPlaceState::Sweeping));
         // Tick 2: EE has moved past the block, pressure drops to 0.0 →
-        // controller commits to lift-and-retract.
+        // controller commits the COARSE peak and enters
+        // LocalizeFineSweep (Step 4.1.1). The coarse peak xy is
+        // stored in `coarse_peak_xy`; `contact_xy` won't be filled in
+        // until the fine raster commits.
         publish_ee_xy(&rig, (0.60, 0.10));
         publish_pressure(&rig, 0.0);
         rig.c.step(Time::ZERO).unwrap();
         assert!(matches!(
             rig.c.state(),
-            SearchAndPlaceState::LiftAndRetract
+            SearchAndPlaceState::LocalizeFineSweep
         ));
-        assert_eq!(rig.c.contact_xy, Some((0.55, 0.10)));
+        assert_eq!(rig.c.coarse_peak_xy, Some((0.55, 0.10)));
+        assert_eq!(rig.c.contact_xy, None);
     }
 
     #[test]
@@ -925,10 +1040,12 @@ mod search_and_place_tests {
     }
 
     /// Drive the rig through LiftToScanAltitude → Sweeping →
-    /// LiftAndRetract → RotateWristForGrasp → ApproachOverContact →
-    /// DescendToContact. Step 4.1: the wrist rotation phase requires
-    /// both `ROTATE_WRIST_TICKS` ticks AND joint convergence; the
-    /// approach phase then drives back to `contact_xy` in grasp pose.
+    /// LocalizeFineSweep → LiftAndRetract → RotateWristForGrasp →
+    /// ApproachOverContact → DescendToContact. Step 4.1.1 inserted
+    /// LocalizeFineSweep between Sweeping and LiftAndRetract; this
+    /// helper drives the rig past the fine raster by reporting
+    /// joints already at each fine waypoint and keeping pressure at
+    /// 0.6 over `contact_xy` so the fine centroid converges to it.
     fn rig_at_descend(contact_xy: (f32, f32)) -> Rig {
         let mut rig = make_rig();
         enter_sweeping(&mut rig);
@@ -937,8 +1054,34 @@ mod search_and_place_tests {
         publish_pressure(&rig, 0.6);
         rig.c.step(Time::ZERO).unwrap();
         assert!(matches!(rig.c.state(), SearchAndPlaceState::Sweeping));
-        // Commit: pressure drops below threshold → LiftAndRetract.
+        // Commit: pressure drops below threshold → LocalizeFineSweep.
         publish_ee_xy(&rig, (contact_xy.0 + 0.05, contact_xy.1));
+        publish_pressure(&rig, 0.0);
+        rig.c.step(Time::ZERO).unwrap();
+        assert!(matches!(
+            rig.c.state(),
+            SearchAndPlaceState::LocalizeFineSweep
+        ));
+        // Drive the entire fine raster: for each offset, report
+        // joints at that waypoint AND pressure 0.6 over contact_xy
+        // so the fine centroid accumulates toward it. Two ticks per
+        // offset: one to drive (joints already there → fine_idx
+        // increments), and the loop continues.
+        let n_offsets = rig.c.fine_raster_offsets.len();
+        for i in 0..n_offsets {
+            let (dx, dy) = rig.c.fine_raster_offsets[i];
+            let target = rig.c.ik_target_with_pitch(
+                (contact_xy.0 + dx, contact_xy.1 + dy),
+                rig.c.scan_z,
+                super::SCAN_WRIST_PITCH,
+            );
+            publish_encoders(&rig, [target.0, target.1, target.2, target.3]);
+            publish_ee_xy(&rig, contact_xy);
+            publish_pressure(&rig, 0.6);
+            rig.c.step(Time::ZERO).unwrap();
+        }
+        // One more tick to drain the raster-exhausted check →
+        // LiftAndRetract.
         publish_pressure(&rig, 0.0);
         rig.c.step(Time::ZERO).unwrap();
         assert!(matches!(
@@ -946,7 +1089,10 @@ mod search_and_place_tests {
             SearchAndPlaceState::LiftAndRetract
         ));
         // Retract completes: report joints at the retracted scan-pose
-        // target → next tick lands in RotateWristForGrasp.
+        // target → next tick lands in RotateWristForGrasp. The fine
+        // centroid set rig.c.contact_xy to (something close to)
+        // contact_xy; retracted_scan_target reads contact_xy via
+        // arg, so we pass it explicitly here.
         let retracted = rig.c.retracted_scan_target(contact_xy);
         publish_encoders(&rig, [retracted.0, retracted.1, retracted.2, retracted.3]);
         rig.c.step(Time::ZERO).unwrap();
