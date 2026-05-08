@@ -394,12 +394,17 @@ impl ArmWorld {
 
         // Grasped object is welded to the EE — refresh its pose from the
         // post-integration EE so the visualization and downstream queries see
-        // it move with the arm (design v2 §5.4).
+        // it move with the arm (design v2 §5.4). With Rapier, the body is
+        // KinematicPositionBased per Step 1.8; we also push the new pose
+        // into Rapier so the next physics step sees it (idempotent — body
+        // is already kinematic, set_object_kinematic just re-sets the pose).
         if let Some(grasped_id) = self.arm.state.grasped {
             let ee = self.ee_pose();
             if let Some(obj) = self.scene.object_mut(grasped_id) {
                 obj.pose = ee;
             }
+            #[cfg(feature = "physics-rapier")]
+            self.physics.set_object_kinematic(grasped_id, ee);
         }
 
         // Advance authoritative sim time and the shared clock together.
@@ -433,6 +438,10 @@ impl ArmWorld {
                 if let Some(obj) = self.scene.object_mut(grasped_id) {
                     obj.state = rtf_sim::object::ObjectState::Free;
                 }
+                // Rapier: switch back to Dynamic so gravity + contact
+                // resume governing the released object.
+                #[cfg(feature = "physics-rapier")]
+                self.physics.set_object_dynamic(grasped_id);
             }
         }
 
@@ -463,6 +472,11 @@ impl ArmWorld {
                         by: rtf_sim::object::ArmRef(arm_id),
                     };
                 }
+                // Rapier: flip the body to KinematicPositionBased so it
+                // stops being affected by gravity / contact and gets
+                // dragged along with the EE each tick.
+                #[cfg(feature = "physics-rapier")]
+                self.physics.set_object_kinematic(id, ee);
             }
         }
     }
@@ -641,6 +655,107 @@ mod tests {
             world.physics().body_count(),
             simple_spec().joints.len(),
             "expected one physics body per arm link"
+        );
+    }
+
+    #[cfg(feature = "physics-rapier")]
+    #[test]
+    fn grasp_switches_body_to_kinematic() {
+        // build_pick_and_place_world has the block at xy=(0.6, 0, 0.525)
+        // and the EE starts at (0, 0, 0.8). Move EE to the block, then
+        // close the gripper → block should be flipped to Kinematic.
+        use crate::test_helpers::{build_pick_and_place_world, BLOCK_OBJECT_ID};
+        use rtf_sim::physics::world::RigidBodyType;
+
+        let mut world = build_pick_and_place_world();
+        // Cheat: directly set joint state so the EE ends up close to the
+        // block. Easier than running PD for this unit test.
+        // π/4 + π/2: shoulder pitched halfway down, elbow at 90°. Brings
+        // EE roughly above the table; the block is then teleported to
+        // the EE in the next two lines.
+        world.arm.state.q = vec![
+            0.0,
+            core::f32::consts::FRAC_PI_4,
+            core::f32::consts::FRAC_PI_2,
+        ];
+        // For the test, we manually move the block to where the EE is.
+        let ee = world.ee_pose();
+        if let Some(obj) = world.scene.object_mut(BLOCK_OBJECT_ID) {
+            obj.pose = ee;
+        }
+        let g_tx = world.attach_gripper_actuator();
+        g_tx.send(GripperCommand { close: true });
+        world.consume_actuators_and_integrate_inner(Duration::from_millis(1));
+
+        let h = world.physics().object_handle(BLOCK_OBJECT_ID).unwrap();
+        assert_eq!(
+            world.physics().body_type(h),
+            Some(RigidBodyType::KinematicPositionBased),
+            "grasp should flip body to KinematicPositionBased"
+        );
+    }
+
+    #[cfg(feature = "physics-rapier")]
+    #[test]
+    fn release_switches_body_back_to_dynamic() {
+        use crate::test_helpers::{build_pick_and_place_world, BLOCK_OBJECT_ID};
+        use rtf_sim::physics::world::RigidBodyType;
+
+        let mut world = build_pick_and_place_world();
+        world.arm.state.q = vec![
+            0.0,
+            core::f32::consts::FRAC_PI_4,
+            core::f32::consts::FRAC_PI_2,
+        ];
+        let ee = world.ee_pose();
+        if let Some(obj) = world.scene.object_mut(BLOCK_OBJECT_ID) {
+            obj.pose = ee;
+        }
+        let g_tx = world.attach_gripper_actuator();
+        g_tx.send(GripperCommand { close: true });
+        world.consume_actuators_and_integrate_inner(Duration::from_millis(1));
+        // Now release.
+        g_tx.send(GripperCommand { close: false });
+        world.consume_actuators_and_integrate_inner(Duration::from_millis(1));
+
+        let h = world.physics().object_handle(BLOCK_OBJECT_ID).unwrap();
+        assert_eq!(
+            world.physics().body_type(h),
+            Some(RigidBodyType::Dynamic),
+            "release should flip body back to Dynamic"
+        );
+    }
+
+    #[cfg(feature = "physics-rapier")]
+    #[test]
+    fn grasped_object_does_not_fall_under_gravity() {
+        use crate::test_helpers::{build_pick_and_place_world, BLOCK_OBJECT_ID};
+
+        let mut world = build_pick_and_place_world();
+        world.arm.state.q = vec![
+            0.0,
+            core::f32::consts::FRAC_PI_4,
+            core::f32::consts::FRAC_PI_2,
+        ];
+        let ee = world.ee_pose();
+        if let Some(obj) = world.scene.object_mut(BLOCK_OBJECT_ID) {
+            obj.pose = ee;
+        }
+        let g_tx = world.attach_gripper_actuator();
+        g_tx.send(GripperCommand { close: true });
+        world.consume_actuators_and_integrate_inner(Duration::from_millis(1));
+        let pose0 = world.scene.object(BLOCK_OBJECT_ID).unwrap().pose;
+
+        // 100 ms of stepping; gravity is on, but the kinematic body
+        // gets re-set to EE each tick → should not move.
+        for _ in 0..100 {
+            world.consume_actuators_and_integrate_inner(Duration::from_millis(1));
+        }
+        let pose1 = world.scene.object(BLOCK_OBJECT_ID).unwrap().pose;
+        let drift = (pose1.translation.vector - pose0.translation.vector).norm();
+        assert!(
+            drift < 1e-3,
+            "grasped object drifted {drift} m (should be ~0)"
         );
     }
 

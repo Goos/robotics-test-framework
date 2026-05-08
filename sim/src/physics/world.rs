@@ -8,11 +8,17 @@ use nalgebra::Isometry3;
 use rapier3d::{
     dynamics::{
         CCDSolver, ImpulseJointSet, IntegrationParameters, IslandManager, MultibodyJointSet,
-        RigidBodyBuilder, RigidBodyHandle, RigidBodySet, RigidBodyType,
+        RigidBodyBuilder, RigidBodyHandle, RigidBodySet,
     },
     geometry::{BroadPhaseMultiSap, ColliderBuilder, ColliderSet, NarrowPhase},
     pipeline::PhysicsPipeline,
 };
+
+/// Re-export of `rapier3d::dynamics::RigidBodyType` so downstream crates
+/// (`rtf_arm`'s tests) can name body types without importing rapier3d
+/// directly. Per design §2 ("Rapier types appear inside `rtf_sim::physics`
+/// only; they don't appear in `rtf_core`, controllers, etc.").
+pub use rapier3d::dynamics::RigidBodyType;
 
 use crate::{fixture::Fixture, object::Object, object::ObjectId, shape::Shape};
 
@@ -258,6 +264,37 @@ impl PhysicsWorld {
         };
         if let Some(body) = self.rigid_body_set.get_mut(handle) {
             body.set_next_kinematic_position(pose);
+        }
+    }
+
+    /// Switch an Object's Rapier body to KinematicPositionBased and
+    /// weld it to `pose`. Phase 1's grasp model
+    /// (rapier-integration design §6 / §11.1): the grasped object stops
+    /// being affected by physics and is dragged along with the EE each
+    /// tick. Phase 3 will replace this with friction-based grasping.
+    pub fn set_object_kinematic(&mut self, id: ObjectId, pose: Isometry3<f32>) {
+        let Some(handle) = self.object_bodies.get(&id).copied() else {
+            return;
+        };
+        if let Some(body) = self.rigid_body_set.get_mut(handle) {
+            body.set_body_type(RigidBodyType::KinematicPositionBased, true);
+            body.set_next_kinematic_position(pose);
+            body.set_linvel(nalgebra::Vector3::zeros(), true);
+            body.set_angvel(nalgebra::Vector3::zeros(), true);
+        }
+    }
+
+    /// Switch an Object's Rapier body back to Dynamic, clearing any
+    /// residual velocity. Inverse of `set_object_kinematic`. Used on
+    /// gripper-release to restore physics-driven motion.
+    pub fn set_object_dynamic(&mut self, id: ObjectId) {
+        let Some(handle) = self.object_bodies.get(&id).copied() else {
+            return;
+        };
+        if let Some(body) = self.rigid_body_set.get_mut(handle) {
+            body.set_body_type(RigidBodyType::Dynamic, true);
+            body.set_linvel(nalgebra::Vector3::zeros(), true);
+            body.set_angvel(nalgebra::Vector3::zeros(), true);
         }
     }
 }
