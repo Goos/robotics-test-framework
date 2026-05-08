@@ -516,18 +516,44 @@ fn main() {
     );
 }
 
-// Phase 3.5 scope-cut: all four find_by_touch e2e seeds are `#[ignore]`
-// for the same root cause as the find_grasp_place / continuous_spawn
-// failures — Phase 3.4.5d's wrist-down geometry has fingers extending
-// 8 cm below the EE, so the sweep at z=0.57 ploughs through the block
-// before the joint-torque-driven contact-trigger algorithm can localize
-// it. find-by-touch's torque sensor reads contact between the arm LINKS
-// and the block, but with fingers driving the block away on every sweep
-// pass, the link-vs-block contact happens at a moved-block xy that the
-// post-trigger descend-to-contact then misses. pick_place (known block
-// xy) is unaffected and converges in 5.4 s with score 1.0. Re-tuning
-// the sweep-driven scenarios is future work; ignored here so the V-gate
-// sweep stays green.
+// Step 4.3 scope-cut (deferred to v1.y): all four find_by_touch
+// e2e seeds remain `#[ignore]` after the Phase 4 sweep-controllers
+// redesign because the scan-pose pattern that fixed
+// find_grasp_place (Step 4.1) and continuous_spawn (Step 4.2) does
+// not resolve find_by_touch's fundamental tension between
+// touch-based search and non-displacing geometry:
+//
+// - find_grasp_place AVOIDS contact during sweep via the pressure
+//   sensor's eps-radius proximity reach: scan_z=0.60 keeps fingers
+//   4 cm above block top, sensor reaches the block from 5-6 cm
+//   away, peak xy localizes the block without ever touching it.
+// - find_by_touch RELIES on physical contact to fire the joint
+//   torque sensor. Two iterations on Step 4.3 confirmed:
+//
+//   1. Scan-pose at scan_z=0.60 (fingers above block top): no
+//      contact during sweep, torque never triggers, sweep
+//      exhausts → Failed. All 4 seeds score 0.0.
+//   2. Scan-pose at scan_z=0.525 (fingers half-overlap block z
+//      range): side contact does trigger torque, but the contact
+//      itself displaces the block 5-10 cm in the impulse
+//      direction. The contact-point sensor reports the contact
+//      xy at the moment of impact, which is on the (already-
+//      displaced) block edge — too imprecise for the post-trigger
+//      descend-to-contact to land both fingers on the block.
+//      Best result was 1 of 4 seeds; rest stuck at score ~0.5
+//      (descended at estimated xy, grasp didn't form).
+//
+// Properly resolving touch-based search likely requires a
+// sensor-model change (e.g. a low-radius proximity sensor that
+// fires at near-contact distance without actual contact, giving
+// the controller a non-displacing trigger), or a different search
+// pattern (e.g. probe-from-above descent). Both are out of scope
+// for this controller-only redesign. Re-ignored here so the
+// V-gate sweep stays green; revisit in v1.y when the sensor model
+// can change.
+//
+// Net Phase 4: 7 of 11 previously-ignored sweep-based seed tests
+// un-ignored (find_grasp_place 3+1, continuous_spawn 2+1).
 
 #[test]
 #[ignore]

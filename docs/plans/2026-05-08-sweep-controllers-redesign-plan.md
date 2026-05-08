@@ -66,6 +66,7 @@ The 3R IK already handles the geometry — same `ik_3r(radial, z, target_pitch, 
 - Possible refinement: ScanPose with fingers OPEN (separation 0.04) so they straddle the block on contact rather than push it.
 - **Commit shape**: 1–2 commits.
 - **Acceptance**: 3 seeds + debug-overlay variant all pass within 30s deadline.
+- **Acceptance NOT met**: scan-pose pattern alone can't resolve touch-vs-displacement tension. Re-ignored with detailed TODO. See commit body.
 
 ## Common implementation notes
 
