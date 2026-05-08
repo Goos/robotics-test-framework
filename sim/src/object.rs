@@ -49,6 +49,15 @@ pub struct Object {
     pub shape: Shape,
     pub mass: f32,
     pub graspable: bool,
+    /// Friction coefficient applied to the object's Rapier collider
+    /// (Phase 3.3). Higher = more grip. Default 0.5 matches Rapier's
+    /// out-of-the-box value; the find-grasp-place / continuous-spawn
+    /// scenarios bumped this to 2.0 in Step 1.13 to keep blocks from
+    /// sliding off the table after a sweep nudge — pre-Phase-3 worlds
+    /// can override via `Object { friction: ..., ..Default }` or set
+    /// it after construction. Phase 3.4's friction-grasp uses this
+    /// value at the finger-pinch contact too.
+    pub friction: f32,
     /// Lifecycle state — see `ObjectState`.
     pub state: ObjectState,
     /// Linear velocity in world frame (m/s). v1 gravity-fall (design §5.5) writes
@@ -70,6 +79,9 @@ impl Object {
             shape,
             mass,
             graspable,
+            // Default to the previous global hard-coded friction (2.0)
+            // so existing scenarios don't change behavior at this step.
+            friction: 2.0,
             state: ObjectState::Free,
             lin_vel: Vector3::zeros(),
         }

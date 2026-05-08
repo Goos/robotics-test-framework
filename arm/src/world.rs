@@ -1837,6 +1837,7 @@ mod tests {
                 mass: 0.1,
                 graspable: false,
                 state: ObjectState::Free,
+                friction: 2.0,
                 lin_vel: Vector3::zeros(),
             });
             let rx = world.attach_pressure_sensor(RateHz::new(1000), eps);
@@ -1869,6 +1870,7 @@ mod tests {
             mass: 0.1,
             graspable: false,
             state: ObjectState::Free,
+            friction: 2.0,
             lin_vel: Vector3::zeros(),
         });
         let rx = world.attach_pressure_sensor(RateHz::new(1000), 0.03);
@@ -2010,6 +2012,7 @@ mod tests {
             mass: 0.1,
             graspable: true,
             state: ObjectState::Free,
+            friction: 2.0,
             lin_vel: Vector3::zeros(),
         }
     }

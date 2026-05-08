@@ -170,9 +170,14 @@ impl PhysicsWorld {
     pub fn insert_object(&mut self, obj: &Object) -> RigidBodyHandle {
         let body = RigidBodyBuilder::dynamic().position(obj.pose).build();
         let handle = self.rigid_body_set.insert(body);
+        // Phase 3.3: friction is now per-object (`obj.friction`) rather
+        // than a global 2.0 — find-grasp-place / continuous-spawn keep
+        // 2.0 by default; Phase 3.4 grasp-robustness will use a
+        // realistic 0.5 once friction-grasp can hold despite the
+        // smaller coefficient.
         let collider = shape_to_collider(&obj.shape)
             .mass(obj.mass)
-            .friction(2.0)
+            .friction(obj.friction)
             .build();
         self.collider_set
             .insert_with_parent(collider, handle, &mut self.rigid_body_set);
@@ -288,6 +293,15 @@ impl PhysicsWorld {
         let collider_handle = body.colliders().first().copied()?;
         let collider = self.collider_set.get(collider_handle)?;
         collider.shape().as_cuboid().map(|c| c.half_extents)
+    }
+
+    /// Read-only accessor for tests inspecting a body's collider
+    /// friction. Returns `None` if the body has no colliders attached.
+    pub fn collider_friction(&self, handle: RigidBodyHandle) -> Option<f32> {
+        let body = self.rigid_body_set.get(handle)?;
+        let collider_handle = body.colliders().first().copied()?;
+        let collider = self.collider_set.get(collider_handle)?;
+        Some(collider.friction())
     }
 
     /// Step the physics pipeline forward by `dt` seconds. Updates `dt`
@@ -559,6 +573,20 @@ mod tests {
         let pose = pw.body_position(h).unwrap();
         assert!((pose.translation.x - 0.3).abs() < 1e-6);
         assert!((pose.translation.z - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn object_friction_is_set_on_collider() {
+        // Phase 3.3: Object.friction propagates into the Rapier collider.
+        let mut pw = PhysicsWorld::new(true);
+        let mut obj = sphere_object(8, 0.0);
+        obj.friction = 0.7;
+        let h = pw.insert_object(&obj);
+        let f = pw.collider_friction(h).expect("collider exists");
+        assert!(
+            (f - 0.7).abs() < 1e-6,
+            "expected collider friction 0.7, got {f}"
+        );
     }
 
     #[test]

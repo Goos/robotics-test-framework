@@ -102,6 +102,7 @@ pub fn build_pick_and_place_world() -> ArmWorld {
         state: ObjectState::Settled {
             on: SupportId::Fixture(0),
         },
+        friction: 2.0,
         lin_vel: Vector3::zeros(),
     });
 
@@ -197,6 +198,7 @@ pub fn build_search_world(seed: u64) -> ArmWorld {
         state: ObjectState::Settled {
             on: SupportId::Fixture(0),
         },
+        friction: 2.0,
         lin_vel: Vector3::zeros(),
     });
 

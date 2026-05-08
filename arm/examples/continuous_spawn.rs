@@ -465,6 +465,7 @@ fn build_continuous_spawn_world(seed: u64, n_spawns: u32, interval: Duration) ->
             state: ObjectState::Settled {
                 on: SupportId::Fixture(0),
             },
+            friction: 2.0,
             lin_vel: Vector3::zeros(),
         };
         let at = Time::from_nanos((i as i64) * interval.as_nanos());
