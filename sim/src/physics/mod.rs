@@ -8,6 +8,12 @@
 //! cfg-gated so the default build doesn't pull in Rapier or its transitive
 //! deps.
 
+#[cfg(feature = "physics-rapier")]
+pub mod world;
+
+#[cfg(feature = "physics-rapier")]
+pub use world::PhysicsWorld;
+
 #[cfg(all(test, feature = "physics-rapier"))]
 mod tests {
     /// Smoke test that rapier3d is reachable when the feature is on.
