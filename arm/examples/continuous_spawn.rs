@@ -418,6 +418,8 @@ fn build_continuous_spawn_world(seed: u64, n_spawns: u32, interval: Duration) ->
         is_support: true,
     });
 
+    // Phase 3.4.5b: same Z-Y-Y-Y geometry as build_pick_and_place_world
+    // (3 pitch + 1 wrist) so the controller can keep EE +x = world -z.
     let spec = ArmSpec {
         joints: vec![
             JointSpec::Revolute {
@@ -432,11 +434,16 @@ fn build_continuous_spawn_world(seed: u64, n_spawns: u32, interval: Duration) ->
                 axis: Vector3::y_axis(),
                 limits: (-PI, PI),
             },
+            JointSpec::Revolute {
+                axis: Vector3::y_axis(),
+                limits: (-PI, PI),
+            }, // J3 wrist pitch (Phase 3.4.5b)
         ],
         link_offsets: vec![
             Isometry3::translation(0.0, 0.0, 0.8),
             Isometry3::translation(0.4, 0.0, 0.0),
             Isometry3::translation(0.4, 0.0, 0.0),
+            Isometry3::translation(0.05, 0.0, 0.0), // wrist (Phase 3.4.5b)
         ],
         gripper: GripperSpec {
             // Wider than the pick-and-place threshold (0.05) for the same

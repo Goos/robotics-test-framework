@@ -106,10 +106,13 @@ pub fn build_pick_and_place_world() -> ArmWorld {
         lin_vel: Vector3::zeros(),
     });
 
-    // Z-Y-Y arm: J0 yaws the chain in xy, J1+J2 are pitch joints that
-    // descend/ascend the EE in the radial-z plane. Pedestal lifts the
-    // shoulder to z=0.8; two equal 0.4 m links give a reach circle of radius
-    // 0.8 m around the shoulder. Block (~0.66 m from shoulder) and bin
+    // Z-Y-Y-Y arm: J0 yaws the chain in xy; J1+J2 are pitch joints that
+    // descend/ascend the EE in the radial-z plane; J3 (Phase 3.4.5b) is a
+    // wrist pitch joint that lets the controller align EE +x with world
+    // -z (fingers pointing straight down) regardless of the J1+J2 pose.
+    // Pedestal lifts the shoulder to z=0.8; two equal 0.4 m links give a
+    // 0.8 m reach circle around the shoulder; the wrist link adds 0.05 m
+    // of forward EE offset. Block (~0.66 m from shoulder) and bin
     // (~0.65 m from shoulder) are both well within reach.
     let spec = ArmSpec {
         joints: vec![
@@ -125,11 +128,16 @@ pub fn build_pick_and_place_world() -> ArmWorld {
                 axis: Vector3::y_axis(),
                 limits: (-PI, PI),
             }, // J2 elbow pitch
+            JointSpec::Revolute {
+                axis: Vector3::y_axis(),
+                limits: (-PI, PI),
+            }, // J3 wrist pitch (Phase 3.4.5b)
         ],
         link_offsets: vec![
             Isometry3::translation(0.0, 0.0, 0.8), // pedestal — invariant under J0 yaw
             Isometry3::translation(0.4, 0.0, 0.0), // upper arm
             Isometry3::translation(0.4, 0.0, 0.0), // forearm
+            Isometry3::translation(0.05, 0.0, 0.0), // wrist (Phase 3.4.5b)
         ],
         gripper: GripperSpec {
             proximity_threshold: 0.05,
@@ -202,6 +210,8 @@ pub fn build_search_world(seed: u64) -> ArmWorld {
         lin_vel: Vector3::zeros(),
     });
 
+    // Same Z-Y-Y-Y geometry as build_pick_and_place_world (Phase 3.4.5b
+    // adds the wrist joint).
     let spec = ArmSpec {
         joints: vec![
             JointSpec::Revolute {
@@ -216,11 +226,16 @@ pub fn build_search_world(seed: u64) -> ArmWorld {
                 axis: Vector3::y_axis(),
                 limits: (-PI, PI),
             },
+            JointSpec::Revolute {
+                axis: Vector3::y_axis(),
+                limits: (-PI, PI),
+            }, // J3 wrist pitch (Phase 3.4.5b)
         ],
         link_offsets: vec![
             Isometry3::translation(0.0, 0.0, 0.8),
             Isometry3::translation(0.4, 0.0, 0.0),
             Isometry3::translation(0.4, 0.0, 0.0),
+            Isometry3::translation(0.05, 0.0, 0.0), // wrist (Phase 3.4.5b)
         ],
         gripper: GripperSpec {
             // Wider than the pick-and-place threshold (0.05) so an arm-link-
@@ -297,6 +312,36 @@ mod tests {
         assert_eq!(block_id(&world), BLOCK_OBJECT_ID);
         assert_eq!(bin_id(&world), BIN_FIXTURE_ID);
         assert!(world.gravity_enabled);
+    }
+
+    /// Phase 3.4.5b: the four scenario world arms now carry a wrist joint
+    /// (J3) plus a 5 cm wrist link. At q=0 the chain is straight along
+    /// world +x, so the EE position lands at the old (0.8, 0, 0.8) plus
+    /// the 5 cm wrist offset = (0.85, 0, 0.8). Locks in the spec change
+    /// so a future regression to a 3-joint scenario arm is caught here.
+    #[test]
+    fn pick_and_place_world_arm_has_wrist_joint_and_link() {
+        let world = build_pick_and_place_world();
+        assert_eq!(
+            world.arm.spec.joints.len(),
+            4,
+            "scenario arm should have 4 joints (Z-Y-Y-Y) post Phase 3.4.5b"
+        );
+        let ee = world.ee_pose();
+        let pos = ee.translation;
+        assert!(
+            (pos.x - 0.85).abs() < 1e-5 && pos.y.abs() < 1e-5 && (pos.z - 0.8).abs() < 1e-5,
+            "expected EE at (0.85, 0, 0.8) at q=0; got ({}, {}, {})",
+            pos.x,
+            pos.y,
+            pos.z
+        );
+    }
+
+    #[test]
+    fn search_world_arm_has_wrist_joint() {
+        let world = build_search_world(0);
+        assert_eq!(world.arm.spec.joints.len(), 4);
     }
 
     #[test]
