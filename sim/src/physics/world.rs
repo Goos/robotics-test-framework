@@ -7,8 +7,8 @@ use std::collections::BTreeMap;
 use nalgebra::Isometry3;
 use rapier3d::{
     dynamics::{
-        CCDSolver, ImpulseJointSet, IntegrationParameters, IslandManager, MultibodyJointSet,
-        RigidBodyBuilder, RigidBodyHandle, RigidBodySet,
+        CCDSolver, FixedJointBuilder, ImpulseJointHandle, ImpulseJointSet, IntegrationParameters,
+        IslandManager, MultibodyJointSet, RigidBodyBuilder, RigidBodyHandle, RigidBodySet,
     },
     geometry::{BroadPhaseMultiSap, ColliderBuilder, ColliderSet, NarrowPhase},
     pipeline::PhysicsPipeline,
@@ -93,6 +93,13 @@ pub struct PhysicsWorld {
     /// keyed by `(arm_id, finger_slot)` (finger_slot is the per-arm
     /// FINGER_SLOT_PLUS/MINUS = 998/999 from `arm::arm`). Phase 3.1.
     arm_finger_bodies: BTreeMap<(u32, u32), RigidBodyHandle>,
+    /// Phase 3.5: handles of `FixedJoint`s currently coupling an arm
+    /// kinematic body to a held object's dynamic body. Indexed by
+    /// `ObjectId` since at most one joint exists per held object. The
+    /// joint provides the actual rigid-body coupling (kinematic-vs-dynamic
+    /// friction wasn't sufficient to hold against rotational shear — see
+    /// design §11.3 for the pivot rationale).
+    grasp_joints: BTreeMap<ObjectId, ImpulseJointHandle>,
 }
 
 impl PhysicsWorld {
@@ -124,6 +131,7 @@ impl PhysicsWorld {
             fixture_bodies: BTreeMap::new(),
             arm_link_bodies: BTreeMap::new(),
             arm_finger_bodies: BTreeMap::new(),
+            grasp_joints: BTreeMap::new(),
         }
     }
 
@@ -468,6 +476,89 @@ impl PhysicsWorld {
             body.set_linvel(nalgebra::Vector3::zeros(), true);
             body.set_angvel(nalgebra::Vector3::zeros(), true);
         }
+    }
+
+    /// Phase 3.5: insert a `FixedJoint` between an arm-link kinematic body
+    /// (typically the EE = last link in the chain) and an Object's dynamic
+    /// body, anchored at the current relative offset between the two
+    /// bodies. The joint locks all 6 DoF, so the held object follows the
+    /// arm link rigidly while remaining a Dynamic body (gravity, contact,
+    /// sleep all continue to apply normally).
+    ///
+    /// Replaces the failed pure-friction approach (design §11.3): in
+    /// practice, kinematic-vs-dynamic contact friction in Rapier doesn't
+    /// transfer rotational coupling cleanly enough to hold a rigid object
+    /// during fast yaw. The joint provides clean coupling; slip is
+    /// re-implemented as an impulse-threshold check in
+    /// `grasp_joint_impulse`.
+    ///
+    /// No-op (returns `None`) if either body is missing or a grasp joint
+    /// for `obj_id` already exists. The caller is responsible for
+    /// `remove_grasp_joint` before re-inserting.
+    pub fn insert_grasp_joint(
+        &mut self,
+        arm_id: u32,
+        arm_link_slot: u32,
+        obj_id: ObjectId,
+    ) -> Option<ImpulseJointHandle> {
+        if self.grasp_joints.contains_key(&obj_id) {
+            return None;
+        }
+        let arm_handle = self
+            .arm_link_bodies
+            .get(&(arm_id, arm_link_slot))
+            .copied()?;
+        let obj_handle = self.object_bodies.get(&obj_id).copied()?;
+        // Compute the joint anchor in each body's local frame from the
+        // current world poses, so the joint's "zero" matches the
+        // pre-grasp relative offset (no snap).
+        let arm_pose = *self.rigid_body_set.get(arm_handle)?.position();
+        let obj_pose = *self.rigid_body_set.get(obj_handle)?.position();
+        // local_frame1 = arm-link-local frame of the joint;
+        // local_frame2 = object-local frame of the joint.
+        // Setting both to identity-with-relative-offset captures the
+        // current relative pose: arm.world * local1 = obj.world * local2.
+        // local1 = identity (joint origin = arm body origin),
+        // local2 = obj^{-1} * arm.
+        let local2 = obj_pose.inverse() * arm_pose;
+        let joint = FixedJointBuilder::new()
+            .local_frame1(Isometry3::identity())
+            .local_frame2(local2)
+            .build();
+        let handle = self
+            .impulse_joint_set
+            .insert(arm_handle, obj_handle, joint, /* wake_up */ true);
+        self.grasp_joints.insert(obj_id, handle);
+        Some(handle)
+    }
+
+    /// Phase 3.5: remove the grasp joint (if any) for `obj_id` and clear
+    /// the lookup entry. Used on gripper-release transitions and on
+    /// slip-impulse-threshold detection.
+    pub fn remove_grasp_joint(&mut self, obj_id: ObjectId) {
+        if let Some(handle) = self.grasp_joints.remove(&obj_id) {
+            self.impulse_joint_set.remove(handle, /* wake_up */ true);
+        }
+    }
+
+    /// Phase 3.5: L2 norm of the grasp joint's accumulated impulse vector
+    /// over the most recent physics step (linear xyz + angular xyz, as a
+    /// single 6-vector magnitude). Returns `None` if no grasp joint is
+    /// active for `obj_id`. Units are N·s for the linear components and
+    /// N·m·s for the angular components — combining them in an L2 norm
+    /// is dimensionally informal but works as a single scalar slip proxy
+    /// (proportional to the load the joint had to resist this tick).
+    pub fn grasp_joint_impulse(&self, obj_id: ObjectId) -> Option<f32> {
+        let handle = self.grasp_joints.get(&obj_id).copied()?;
+        let joint = self.impulse_joint_set.get(handle)?;
+        Some(joint.impulses.norm())
+    }
+
+    /// Read-only check used by tests: is a grasp joint currently active
+    /// for the given object? Equivalent to `grasp_joint_impulse(...).is_some()`
+    /// without computing the norm.
+    pub fn has_grasp_joint(&self, obj_id: ObjectId) -> bool {
+        self.grasp_joints.contains_key(&obj_id)
     }
 
     /// Iterate every contact pair touching a link of arm `arm_id`.

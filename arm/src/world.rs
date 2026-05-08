@@ -480,9 +480,11 @@ impl ArmWorld {
         if let Some(cmd) = gripper_cmd {
             self.apply_gripper_command(cmd);
         }
-        // Phase 3.2: even with no command this tick, slew separation
-        // toward the latched target and re-evaluate grasp transitions.
-        self.update_gripper_separation_and_transitions(dt);
+        // Phase 3.2/3.5: even with no command this tick, slew separation
+        // toward the latched target and re-evaluate the closed-flag.
+        // The (was_closed, now_closed) edge values feed the post-step
+        // grasp-joint logic in `derive_joint_grasp_state`.
+        let (was_closed, now_closed) = self.update_gripper_separation_and_transitions(dt);
 
         // Rapier physics step (rapier-integration plan, Step 1.6).
         // Per design §4: update arm-link kinematic body poses from FK,
@@ -532,18 +534,14 @@ impl ArmWorld {
                 };
             }
 
-            // Phase 3.4 friction-grasp derivation. Replaces the Phase 1
-            // kinematic-weld grasp: instead of switching the body to
-            // KinematicPositionBased on close-edge, the held object stays
-            // Dynamic and is pinched between the two finger colliders by
-            // friction. Per tick (after sync_to_scene + Settled-derivation)
-            // we recompute Grasped state purely from observation:
-            //   `Grasped` iff gripper_closed AND both fingers contact the
-            //   same graspable object.
-            // The arm.state.grasped pointer is also re-derived here so it
-            // tracks slip (object falls out of grip mid-motion → both
-            // fields back to None / Free in the same tick).
-            self.derive_friction_grasp_state();
+            // Phase 3.5 joint-attached grasp (design §11.3 pivot from
+            // pure friction). Per tick after physics.step + sync +
+            // Settled-derivation: handle gripper open/close edges
+            // (insert/remove FixedJoint between EE and held object) and
+            // run the slip-impulse threshold check on the currently-held
+            // object. The held object stays Dynamic; the joint is what
+            // actually couples it to the EE.
+            self.derive_joint_grasp_state(was_closed, now_closed);
         }
 
         // Advance authoritative sim time and the shared clock together.
@@ -599,10 +597,11 @@ impl ArmWorld {
     /// `gripper_separation` toward `gripper_target` at
     /// `GRIPPER_SLEW_RATE_M_PER_S` and re-derives `gripper_closed` from
     /// the new separation (with hysteresis between the closed/open
-    /// thresholds). Grasp / release transitions themselves are no longer
-    /// edge-triggered here — they're derived per tick from finger contact
-    /// in `derive_friction_grasp_state`, called after the physics step.
-    fn update_gripper_separation_and_transitions(&mut self, dt: Duration) {
+    /// thresholds). Returns `(was_closed, now_closed)` so the caller
+    /// can react to the open→closed and closed→open edges (Phase 3.5
+    /// joint-attached grasp uses these to insert/remove the grasp
+    /// joint after the physics step).
+    fn update_gripper_separation_and_transitions(&mut self, dt: Duration) -> (bool, bool) {
         let dt_s = dt.as_nanos() as f32 / 1.0e9_f32;
         let max_step = Self::GRIPPER_SLEW_RATE_M_PER_S * dt_s;
         let cur = self.arm.state.gripper_separation;
@@ -626,66 +625,106 @@ impl ArmWorld {
             next < Self::GRIPPER_CLOSED_THRESHOLD_M
         };
         self.arm.state.gripper_closed = now_closed;
+        (was_closed, now_closed)
     }
 
-    /// Phase 3.4: derive the per-object Grasped state and the
-    /// `arm.state.grasped` pointer from finger contacts. Called once per
-    /// tick after `physics.step + sync_to_scene + Settled-derivation`.
+    /// Phase 3.5: slip-impulse threshold (norm of the FixedJoint's
+    /// 6-vector accumulated impulse over one physics step). When the
+    /// joint has to resist this much load to keep the held object
+    /// attached to the EE, we treat it as a "would have slipped under
+    /// real friction" event and release the grasp. Empirically tuned to
+    /// 5.0 (linear N·s + angular N·m·s combined) — joint impulse stays
+    /// well under 1 during normal slow ascend / yaw, spikes up to 10+
+    /// during deliberately fast jerk-the-arm-away maneuvers (Step 3.6's
+    /// grasp_robustness scenario).
+    const SLIP_IMPULSE_THRESHOLD: f32 = 5.0;
+
+    /// Phase 3.5: handle gripper open/close edges and per-tick slip
+    /// detection by inserting / removing a `FixedJoint` between the EE
+    /// arm-link kinematic body and the held object's dynamic body
+    /// (design §11.3 — joint-attached grasp replaces the failed
+    /// pure-friction approach).
+    ///
+    /// Called once per tick after `physics.step + sync_to_scene +
+    /// Settled-derivation`. `was_closed` and `now_closed` are passed
+    /// from `update_gripper_separation_and_transitions` so the edge
+    /// detection uses the values that bracket this tick's slew.
     ///
     /// Rules:
-    ///   - For each graspable Object with a Rapier body:
-    ///       * If gripper is closed AND both fingers are in contact with
-    ///         the object, set state to Grasped { by: this arm }.
-    ///       * Otherwise, if the object is currently Grasped by this arm,
-    ///         transition it back to Free (slip / open).
-    ///   - `arm.state.grasped` is set to the (deterministic) lowest
-    ///     ObjectId currently Grasped, or None.
+    ///   - **Open edge** (was_closed && !now_closed): if a grasp joint
+    ///     exists, remove it and transition the object Grasped → Free.
+    ///   - **Close edge** (!was_closed && now_closed) AND nothing is
+    ///     currently grasped: scan graspable objects for one in contact
+    ///     with both fingers; if found, insert a grasp joint and
+    ///     transition the object to Grasped.
+    ///   - **Per-tick slip check**: for the currently-grasped object,
+    ///     if `grasp_joint_impulse > SLIP_IMPULSE_THRESHOLD`, treat as
+    ///     slip — remove the joint and transition Grasped → Free.
     ///
-    /// Iteration is by ObjectId (BTreeMap) so choice is deterministic
-    /// across runs.
+    /// `arm.state.grasped` is the ObjectId currently held (or None).
     #[cfg(feature = "physics-rapier")]
-    fn derive_friction_grasp_state(&mut self) {
+    fn derive_joint_grasp_state(&mut self, was_closed: bool, now_closed: bool) {
         let arm_id = self.arm.id;
-        let gripper_closed = self.arm.state.gripper_closed;
-        let mut new_grasped: Option<rtf_sim::object::ObjectId> = None;
-        // Collect ids first to avoid borrowing scene mutably while we
-        // also read the physics narrow-phase.
-        let ids: Vec<rtf_sim::object::ObjectId> = self.scene.objects().map(|(id, _)| *id).collect();
-        for id in ids {
-            let Some(obj) = self.scene.object(id) else {
-                continue;
-            };
-            if !obj.graspable {
-                continue;
+        // EE = the last arm link (slot = n_joints - 1). Joint anchors
+        // here; per-tick FK keeps that body's pose synced.
+        let ee_link_slot = (self.arm.spec.joints.len() as u32).saturating_sub(1);
+
+        // Open edge: release any held object.
+        if was_closed && !now_closed {
+            if let Some(grasped_id) = self.arm.state.grasped.take() {
+                self.physics.remove_grasp_joint(grasped_id);
+                if let Some(obj) = self.scene.object_mut(grasped_id) {
+                    obj.state = rtf_sim::object::ObjectState::Free;
+                }
             }
-            let in_grip = gripper_closed
-                && self.physics.object_in_contact_with_fingers(
-                    id,
-                    arm_id,
-                    crate::arm::FINGER_SLOT_PLUS,
-                    crate::arm::FINGER_SLOT_MINUS,
-                );
-            let was_grasped = matches!(obj.state, rtf_sim::object::ObjectState::Grasped { .. });
-            if in_grip {
-                if !was_grasped {
-                    if let Some(o) = self.scene.object_mut(id) {
-                        o.state = rtf_sim::object::ObjectState::Grasped {
+            return;
+        }
+
+        // Per-tick slip check on the currently-grasped object.
+        if let Some(grasped_id) = self.arm.state.grasped {
+            let impulse = self.physics.grasp_joint_impulse(grasped_id).unwrap_or(0.0);
+            if impulse > Self::SLIP_IMPULSE_THRESHOLD {
+                self.physics.remove_grasp_joint(grasped_id);
+                self.arm.state.grasped = None;
+                if let Some(obj) = self.scene.object_mut(grasped_id) {
+                    obj.state = rtf_sim::object::ObjectState::Free;
+                }
+            }
+        }
+
+        // Close edge AND nothing held: try to grasp.
+        if !was_closed && now_closed && self.arm.state.grasped.is_none() {
+            // Scan graspable objects in deterministic ObjectId order
+            // (BTreeMap iteration); pick the first one in contact with
+            // both fingers.
+            let candidate: Option<rtf_sim::object::ObjectId> =
+                self.scene.objects().find_map(|(id, obj)| {
+                    if !obj.graspable {
+                        return None;
+                    }
+                    let in_grip = self.physics.object_in_contact_with_fingers(
+                        *id,
+                        arm_id,
+                        crate::arm::FINGER_SLOT_PLUS,
+                        crate::arm::FINGER_SLOT_MINUS,
+                    );
+                    in_grip.then_some(*id)
+                });
+            if let Some(id) = candidate {
+                let inserted = self
+                    .physics
+                    .insert_grasp_joint(arm_id, ee_link_slot, id)
+                    .is_some();
+                if inserted {
+                    self.arm.state.grasped = Some(id);
+                    if let Some(obj) = self.scene.object_mut(id) {
+                        obj.state = rtf_sim::object::ObjectState::Grasped {
                             by: rtf_sim::object::ArmRef(arm_id),
                         };
                     }
                 }
-                if new_grasped.is_none() {
-                    new_grasped = Some(id);
-                }
-            } else if was_grasped {
-                // Slip or open: drop back to Free; the next Settled-pass
-                // tick will reclassify if velocity falls below threshold.
-                if let Some(o) = self.scene.object_mut(id) {
-                    o.state = rtf_sim::object::ObjectState::Free;
-                }
             }
         }
-        self.arm.state.grasped = new_grasped;
     }
 
     /// Advance every sensor scheduler by `dt` and publish a fresh reading on
