@@ -547,6 +547,59 @@ Tests:
 
 This is the central change. Expect existing example tests to break here — controllers that issue `target_separation = 0.012` and expect immediate weld will need re-tuning (e.g., add a delay between close-command and ascend, slow ascend velocity so friction holds).
 
+### Step 3.4.5 — `[arm] Add wrist joint (J3) + 3R IK helper`
+
+Inserted post-implementation. Step 3.4's friction-grasp surfaced that the 3-joint Z-Y-Y arm physically cannot orient EE +z straight down at non-trivial reach (cumulative J1+J2 pitch ~58° at the canonical grasp pose; needs ~90° for fingers to actually envelop the block). Pre-existing geometry debt that the kinematic-weld grasp masked. Treated as an interlude inside Phase 3.
+
+Three commits. Each remains "(intermediate)" — example tests stay broken until Step 3.5 retunes friction.
+
+#### 3.4.5a — `[arm] 3R planar IK helper`
+
+**File**: `arm/src/ik.rs` (extend).
+
+Add:
+```rust
+/// 3R planar IK in the shoulder-local (radial, z) plane with explicit
+/// EE pitch target. Returns (J1, J2, J3) where:
+/// - EE position (after the J3 wrist link of length l3) is at (target_x, target_z)
+/// - EE +x direction has world pitch `target_pitch` (e.g., -π/2 for EE pointing world -z)
+pub fn ik_3r(target_x: f32, target_z: f32, target_pitch: f32,
+             l1: f32, l2: f32, l3: f32) -> Option<(f32, f32, f32)>;
+```
+
+Math: compute wrist-anchor target by subtracting `l3 * (cos(target_pitch), -sin(target_pitch))` from the EE target. Run `ik_2r` on the wrist anchor for J1, J2. Then `J3 = target_pitch - (J1 + J2)`.
+
+Tests: boundary cases (level wrist, wrist pointing down, wrist pointing up), FK round-trip via `forward_kinematics` on a 4-joint spec, unreachable cases.
+
+Commit `[arm] Step 3.4.5a: 3R planar IK helper`.
+
+#### 3.4.5b — `[arm,sim] Extend arm spec to 4-joint with wrist link`
+
+**Files**: `arm/src/test_helpers.rs` (extend), `arm/examples/find_by_touch.rs` (find_by_touch has its own world builder inline), and any other scenario world builders that have hand-rolled `ArmSpec`s.
+
+Change each ArmSpec:
+- Add J3: `JointSpec::Revolute { axis: Vector3::y_axis(), limits: (-PI, PI) }`
+- Add wrist link offset: `Isometry3::translation(0.05, 0.0, 0.0)` (5 cm wrist)
+- Update any link-length constants used by controllers (`L1`, `L2`, `L3 = 0.05`, etc.)
+
+Tests: existing FK / arm-construction tests still pass with J3 = 0 (verify EE position with J3 = 0 matches old position plus the 5 cm wrist offset along the chain's terminal direction).
+
+Commit `[arm,sim] Step 3.4.5b: 4-joint arm spec with wrist (intermediate)`.
+
+#### 3.4.5c — `[arm] Controllers drive J3 to keep EE pointing down`
+
+**Files**: `arm/examples/pick_place.rs`, `arm/examples/find_grasp_place.rs`, `arm/examples/continuous_spawn.rs`, `arm/examples/find_by_touch.rs`.
+
+Each controller's pre-computed IK calls swap `ik_2r(...)` → `ik_3r(..., target_pitch = -PI/2.0)` (EE +x rotates to world -z, fingers point down). Constructor signatures gain `l3: f32` param. Sweep poses can use the same `target_pitch` (EE pointing down throughout the sweep).
+
+Joint convergence checks now compare 4 joints instead of 3.
+
+Example tests still failing at end of this commit (friction tuning is Step 3.5).
+
+Commit `[arm] Step 3.4.5c: Controllers drive J3 via 3R IK (intermediate)`.
+
+---
+
 ### Step 3.5 — `[arm] Re-tune existing example controllers for friction grasp`
 
 **Files**: `arm/examples/pick_place.rs`, `arm/examples/find_grasp_place.rs`, `arm/examples/continuous_spawn.rs`, `arm/examples/find_by_touch.rs`.
