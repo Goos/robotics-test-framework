@@ -39,11 +39,36 @@ use rtf_harness::{run, RunConfig};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchAndPlaceState {
-    /// Walking through `sweep_waypoints` at fixed altitude until the
-    /// pressure signal exceeds threshold.
+    /// Initial transition from the world's q=0 pose to the first scan
+    /// waypoint (wrist level, scan altitude). One-shot; drops into
+    /// `Sweeping` once joints converge. Ensures we don't start sweeping
+    /// from an arbitrary partially-IK'd pose.
+    LiftToScanAltitude,
+    /// Walking through `scan_waypoints` (wrist level, target_pitch=0,
+    /// fingers extending horizontally forward) at `sweep_z` until the
+    /// pressure signal exceeds threshold. Wrist-level keeps the fingers
+    /// from bulldozing the block during the localization sweep.
     Sweeping,
-    /// Pressure spiked while sweeping; descending toward the block top at
-    /// `contact_xy` for grasp.
+    /// Post-detection retract: pull the EE radially inward (toward the
+    /// shoulder) AND a few cm up so neither the wrist link arc nor the
+    /// finger pillars touch the block while J3 swings through 90°.
+    /// Target is `(contact_xy * RETRACT_FACTOR, scan_z + APPROACH_DZ)`
+    /// at scan-pose pitch (wrist still level, J3 unchanged).
+    LiftAndRetract,
+    /// Pressure peak settled; J0/J1/J2 hold the retracted scan-pose
+    /// target, J3 drives from 0 to π/2 over ~500 ms so the wrist
+    /// transitions from "level" to "down". With the EE retracted, the
+    /// wrist link's 5 cm arc sweeps in empty space well clear of the
+    /// block.
+    RotateWristForGrasp,
+    /// J3 settled to grasp pose; drive J0/J1/J2 to bring the EE from the
+    /// retracted-and-rotated position back over `contact_xy` at
+    /// `scan_z + APPROACH_DZ` (now in grasp pose, fingers vertical).
+    /// Approach is purely a horizontal arc in joint space — fingers
+    /// pass over the block at altitude before descending.
+    ApproachOverContact,
+    /// EE positioned over `contact_xy` in grasp pose at approach
+    /// altitude; descending to grasp_z to grip the block.
     DescendToContact,
     /// Closing gripper (n = ticks held closed so far).
     CloseGripper(u32),
@@ -69,10 +94,33 @@ const PARK_Z: f32 = 0.85;
 /// Ticks to hold the gripper closed before transitioning to Ascend.
 /// Matches PickPlace.
 const CLOSE_HOLD_TICKS: u32 = 200;
-/// Phase 3.4.5c: cumulative chain pitch the controller drives (J1+J2+J3)
-/// to keep EE +x = world -z (fingers protruding straight down). Per
-/// `ik_3r`'s "+α-rotates-+x-toward-`-z`" convention, this is +π/2.
-const TARGET_WRIST_PITCH: f32 = core::f32::consts::FRAC_PI_2;
+/// Cumulative chain pitch (J1+J2+J3) for the wrist-down GRASP pose:
+/// EE +x = world -z, fingers protruding straight down. Per `ik_3r`'s
+/// "+α-rotates-+x-toward-`-z`" convention, this is +π/2.
+const GRASP_WRIST_PITCH: f32 = core::f32::consts::FRAC_PI_2;
+/// Cumulative chain pitch for the wrist-level SCAN pose: EE +x = world
+/// +x, fingers extending horizontally forward of the EE rather than
+/// downward. The Step 4.1 redesign uses this during sweep so the
+/// fingers don't bulldoze the block top before pressure-peak
+/// localization can converge.
+const SCAN_WRIST_PITCH: f32 = 0.0;
+/// Vertical clearance (m) added on top of `scan_z` for both the
+/// retract-before-rotate position and the approach-over-contact
+/// position. 5 cm keeps the wrist link, fingers, and EE body well
+/// above the block (top at z=0.55, scan_z=0.60) during rotation and
+/// horizontal approach.
+const APPROACH_DZ: f32 = 0.05;
+/// Radial pullback factor applied to `contact_xy` for the retract
+/// state. Multiplying both x and y by 0.70 pulls the EE ~30%
+/// shoulder-ward along the line from the shoulder to the block,
+/// moving the wrist link's 5 cm rotation arc into empty space. Yaw
+/// stays the same (atan2 invariant under uniform xy scaling).
+const RETRACT_FACTOR: f32 = 0.70;
+/// Ticks for the J3 wrist rotation from scan-pose (0) to grasp-pose
+/// (π/2) at 0.5 m/s-equivalent (~3.14 rad/s of joint motion, ~500 ms
+/// of slew). 600 ticks @ 1 ms gives the rotation 600 ms to complete +
+/// settle within `joint_tol`.
+const ROTATE_WRIST_TICKS: u32 = 600;
 /// Ticks to hold the gripper open before transitioning to Done.
 /// Matches PickPlace.
 const OPEN_HOLD_TICKS: u32 = 200;
@@ -84,20 +132,39 @@ where
     Pr: PortReader<PressureReading>,
 {
     state: SearchAndPlaceState,
-    /// Pre-computed (J0, J1, J2, J3) joint targets in serpentine order over
-    /// the search region at fixed sweep altitude. Constructor-computed so
-    /// the hot path doesn't run IK per tick. Phase 3.4.5c: J3 keeps EE +x
-    /// pointing world -z (fingers down) at every sweep waypoint.
-    sweep_waypoints: Vec<(f32, f32, f32, f32)>,
+    /// Pre-computed (J0, J1, J2, J3) joint targets in serpentine order
+    /// over the search region at fixed `scan_z`. Constructor-computed so
+    /// the hot path doesn't run IK per tick. Step 4.1: J3 keeps the
+    /// wrist LEVEL during sweep (target_pitch=0) so the fingers extend
+    /// horizontally forward of the EE rather than downward into the
+    /// block top.
+    scan_waypoints: Vec<(f32, f32, f32, f32)>,
     sweep_idx: usize,
-    /// EE xy at the running max-pressure moment seen so far. Cheap form of
-    /// peak-tracking: instead of descending at the FIRST sample above
-    /// threshold (which is offset from the block centre by EE velocity), the
-    /// controller keeps sweeping while pressure rises and only commits to
-    /// descend once pressure falls back below threshold — at which point
-    /// peak_xy is the best on-track guess of the block's xy.
+    /// Sweep altitude in world frame (m). Held constant across the
+    /// scan_waypoints. Step 4.1: at 0.60 the EE sits 5 cm above the
+    /// block top — enough to clear the wrist-level finger pillars
+    /// (which extend ±0.04 m vertically around the EE in scan pose).
+    /// Pair with an enlarged pressure-sensor eps so the sensor still
+    /// reaches the block at this altitude.
+    scan_z: f32,
+    /// Tick counter for `RotateWristForGrasp`: drives J3 from 0 to
+    /// `GRASP_WRIST_PITCH` over `ROTATE_WRIST_TICKS` ticks while
+    /// J0/J1/J2 hold the scan-pose target above `contact_xy`.
+    rotate_wrist_n: u32,
+    /// Pressure-weighted centroid accumulator: sum of `(p * x, p * y)`
+    /// over every sample above `pressure_threshold` since the start of
+    /// the current contact event, plus the cumulative pressure weight.
+    /// Step 4.1: replaces the previous "max-pressure xy" peak with a
+    /// centroid so a block falling between two adjacent sweep stripes
+    /// localizes to the y-midpoint of those stripes rather than
+    /// snapping to whichever stripe happened to register the
+    /// fractionally higher peak. Improves grasp accuracy for
+    /// off-stripe blocks (seed 1337 corner case).
+    pressure_weighted_xy: (f64, f64),
+    pressure_weight_sum: f64,
+    /// Last known max pressure — kept only for the threshold-fall-off
+    /// commit logic (`peak > threshold && current < threshold` → commit).
     peak_pressure: f32,
-    peak_xy: Option<(f32, f32)>,
     /// Final commit position for descent (= peak_xy at transition time).
     contact_xy: Option<(f32, f32)>,
     target_bin_xy: (f32, f32),
@@ -123,12 +190,16 @@ where
     P: PortReader<EePoseReading>,
     Pr: PortReader<PressureReading>,
 {
-    /// Construct the controller. Pre-computes a serpentine raster of joint-space
-    /// waypoints over the (x_min..=x_max) × (y_min..=y_max) region at fixed
-    /// `sweep_z`. Each xy is converted to (J0, J1, J2) by polar-decomposing
-    /// the planar offset and calling 2R IK on the radial-z plane. Panics if
-    /// any waypoint is unreachable (region should be sized so this can't
-    /// happen — see find-grasp-place design §3.3).
+    /// Construct the controller. Pre-computes a serpentine raster of
+    /// joint-space waypoints over the (x_min..=x_max) × (y_min..=y_max)
+    /// region at fixed `scan_z` with the wrist LEVEL (target_pitch=0,
+    /// fingers horizontal). Each xy is converted to (J0, J1, J2, J3) by
+    /// polar-decomposing the planar offset and calling 3R IK. Panics if
+    /// any waypoint is unreachable.
+    ///
+    /// The Step 4.1 redesign separates the scan pose (used here, fingers
+    /// out of the way of the block) from the grasp pose (wrist down,
+    /// computed in `ik_target_for` for descent + ascent + place).
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         encoder_rxs: Vec<R>,
@@ -138,7 +209,7 @@ where
         gripper_tx: PortTx<GripperCommand>,
         region_x: (f32, f32),
         region_y: (f32, f32),
-        sweep_z: f32,
+        scan_z: f32,
         stripe_dy: f32,
         target_bin_xy: (f32, f32),
         arm_shoulder_z: f32,
@@ -147,23 +218,26 @@ where
         l3: f32,
     ) -> Self {
         let xy_waypoints = serpentine_waypoints(region_x, region_y, stripe_dy);
-        let target_pitch = TARGET_WRIST_PITCH;
-        let sweep_waypoints: Vec<(f32, f32, f32, f32)> = xy_waypoints
+        let scan_waypoints: Vec<(f32, f32, f32, f32)> = xy_waypoints
             .iter()
             .map(|&(x, y)| {
                 let r = (x * x + y * y).sqrt();
-                let (j1, j2, j3) = ik_3r(r, sweep_z - arm_shoulder_z, target_pitch, l1, l2, l3)
-                    .expect("sweep waypoint unreachable — check region vs arm reach");
+                let (j1, j2, j3) =
+                    ik_3r(r, scan_z - arm_shoulder_z, SCAN_WRIST_PITCH, l1, l2, l3)
+                        .expect("scan waypoint unreachable — check region vs arm reach");
                 let yaw = y.atan2(x);
                 (yaw, j1, j2, j3)
             })
             .collect();
         Self {
-            state: SearchAndPlaceState::Sweeping,
-            sweep_waypoints,
+            state: SearchAndPlaceState::LiftToScanAltitude,
+            scan_waypoints,
             sweep_idx: 0,
+            scan_z,
+            rotate_wrist_n: 0,
+            pressure_weighted_xy: (0.0, 0.0),
+            pressure_weight_sum: 0.0,
             peak_pressure: 0.0,
-            peak_xy: None,
             contact_xy: None,
             target_bin_xy,
             pressure_threshold: 0.2,
@@ -200,6 +274,13 @@ where
     /// the supplied target via P-on-position with kp=4.0, clamped to
     /// ±2 rad/s (matches PickPlace's gain choices).
     fn drive_joints_toward(&mut self, target: (f32, f32, f32, f32)) {
+        self.drive_joints_toward_with_clamp(target, 2.0);
+    }
+
+    /// Same as `drive_joints_toward` but with a configurable speed
+    /// clamp. Slow descent (clamp ~0.5) reduces the impulse against
+    /// the block on contact, keeping the friction-grasp window viable.
+    fn drive_joints_toward_with_clamp(&mut self, target: (f32, f32, f32, f32), clamp: f32) {
         let qs = self.joint_qs();
         for (i, t) in [
             (0usize, target.0),
@@ -211,7 +292,7 @@ where
                 break;
             }
             let cur = qs.get(i).copied().unwrap_or(0.0);
-            let q_dot = ((t - cur) * 4.0).clamp(-2.0, 2.0);
+            let q_dot = ((t - cur) * 4.0).clamp(-clamp, clamp);
             self.velocity_txs[i].send(JointVelocityCommand {
                 joint: JointId(i as u32),
                 q_dot_target: q_dot,
@@ -242,23 +323,47 @@ where
     }
 
     /// Compute (J0, J1, J2, J3) joint target for an EE world xy at
-    /// altitude `z`. J0 is yaw = atan2(y, x); (J1, J2, J3) come from
-    /// `ik_3r` on the radial-z plane with cumulative pitch =
-    /// `TARGET_WRIST_PITCH` (EE +x = world -z, fingers down). Panics on
-    /// unreachable targets — every call site here uses pre-validated
-    /// geometry (within search region or the bin).
+    /// altitude `z` with the wrist DOWN (fingers pointing straight at
+    /// the table). Used for descent, ascent, and bin-place — every
+    /// motion that needs to actually grip the block.
     fn ik_target_for(&self, xy: (f32, f32), z: f32) -> (f32, f32, f32, f32) {
+        self.ik_target_with_pitch(xy, z, GRASP_WRIST_PITCH)
+    }
+
+    /// Compute the joint target for the retract-before-rotate state:
+    /// EE pulled radially inward to `contact_xy * RETRACT_FACTOR` and
+    /// up by `APPROACH_DZ`, wrist still level (scan pose). Used by
+    /// both `LiftAndRetract` (entry) and `RotateWristForGrasp`
+    /// (J0/J1/J2 hold while J3 swings).
+    fn retracted_scan_target(&self, contact_xy: (f32, f32)) -> (f32, f32, f32, f32) {
+        let retracted_xy = (
+            contact_xy.0 * RETRACT_FACTOR,
+            contact_xy.1 * RETRACT_FACTOR,
+        );
+        self.ik_target_with_pitch(retracted_xy, self.scan_z + APPROACH_DZ, SCAN_WRIST_PITCH)
+    }
+
+    /// Generic 4-DOF IK helper: `(yaw, J1, J2, J3)` for a target EE xy
+    /// at altitude `z` with cumulative pitch `target_pitch`. Panics on
+    /// unreachable targets — call sites use pre-validated geometry
+    /// (within search region or the bin).
+    fn ik_target_with_pitch(
+        &self,
+        xy: (f32, f32),
+        z: f32,
+        target_pitch: f32,
+    ) -> (f32, f32, f32, f32) {
         let (x, y) = xy;
         let r = (x * x + y * y).sqrt();
         let (j1, j2, j3) = ik_3r(
             r,
             z - self.arm_shoulder_z,
-            TARGET_WRIST_PITCH,
+            target_pitch,
             self.l1,
             self.l2,
             self.l3,
         )
-        .expect("post-contact IK target unreachable — check geometry");
+        .expect("IK target unreachable — check geometry");
         (y.atan2(x), j1, j2, j3)
     }
 }
@@ -273,46 +378,121 @@ where
         let pressure = self.pressure_rx.latest().map(|r| r.pressure).unwrap_or(0.0);
 
         match self.state {
+            SearchAndPlaceState::LiftToScanAltitude => {
+                // Drive the arm from its q=0 starting pose into the
+                // first scan waypoint. Drops to `Sweeping` once joints
+                // converge so peak-tracking starts with the EE actually
+                // at scan altitude (not partway through the lift).
+                let target = self.scan_waypoints[self.sweep_idx];
+                self.drive_joints_toward(target);
+                if self.joints_converged_to(target) {
+                    self.state = SearchAndPlaceState::Sweeping;
+                }
+            }
             SearchAndPlaceState::Sweeping => {
-                // Track running peak: if current pressure is higher than the
-                // peak so far, record this EE xy as the new peak xy. This
-                // gives a better contact estimate than triggering on the
-                // first sample above threshold (which is biased by EE
-                // velocity into the contact zone).
-                if pressure > self.peak_pressure {
-                    self.peak_pressure = pressure;
-                    if let Some(xy) = self.ee_xy() {
-                        self.peak_xy = Some(xy);
+                // Pressure-weighted centroid: every sample above the
+                // threshold contributes (pressure * ee_xy) to the
+                // running sum. The committed contact_xy is
+                // sum / weight, which interpolates between adjacent
+                // sweep stripes rather than snapping to the
+                // momentarily-strongest one. peak_pressure is still
+                // tracked so the fall-off commit logic still fires.
+                if pressure > self.pressure_threshold {
+                    if let Some((x, y)) = self.ee_xy() {
+                        let p = pressure as f64;
+                        self.pressure_weighted_xy.0 += p * x as f64;
+                        self.pressure_weighted_xy.1 += p * y as f64;
+                        self.pressure_weight_sum += p;
+                    }
+                    if pressure > self.peak_pressure {
+                        self.peak_pressure = pressure;
                     }
                 }
 
-                // Commit to descent once we've seen a peak above threshold AND
-                // pressure has fallen back below threshold (i.e. we've already
-                // crossed the block's contact zone — the peak xy is now our
-                // best block-position estimate).
+                // Commit to wrist rotation once we've seen a peak above
+                // threshold AND pressure has fallen back below threshold
+                // (i.e. we've already crossed the block's contact zone —
+                // the centroid is now our best block-position estimate).
                 if self.peak_pressure > self.pressure_threshold
                     && pressure < self.pressure_threshold
+                    && self.pressure_weight_sum > 0.0
                 {
-                    self.contact_xy = self.peak_xy;
-                    self.state = SearchAndPlaceState::DescendToContact;
+                    let cx = (self.pressure_weighted_xy.0 / self.pressure_weight_sum) as f32;
+                    let cy = (self.pressure_weighted_xy.1 / self.pressure_weight_sum) as f32;
+                    self.contact_xy = Some((cx, cy));
+                    self.rotate_wrist_n = 0;
+                    self.state = SearchAndPlaceState::LiftAndRetract;
                     self.halt_joints();
                     return Ok(());
                 }
 
-                let target = self.sweep_waypoints[self.sweep_idx];
+                let target = self.scan_waypoints[self.sweep_idx];
                 self.drive_joints_toward(target);
                 if self.joints_converged_to(target) {
                     self.sweep_idx += 1;
-                    if self.sweep_idx >= self.sweep_waypoints.len() {
+                    if self.sweep_idx >= self.scan_waypoints.len() {
                         self.state = SearchAndPlaceState::Failed;
                         self.halt_joints();
                     }
                 }
             }
+            SearchAndPlaceState::LiftAndRetract => {
+                // Drive EE radially inward (cxy * RETRACT_FACTOR) and
+                // up by APPROACH_DZ so the wrist-link rotation arc
+                // happens in empty space, well clear of the block.
+                // J3 unchanged (still scan-pose / wrist level).
+                let cxy = self.contact_xy.expect("contact_xy set on Sweeping exit");
+                let target = self.retracted_scan_target(cxy);
+                self.drive_joints_toward(target);
+                if self.joints_converged_to(target) {
+                    self.state = SearchAndPlaceState::RotateWristForGrasp;
+                }
+            }
+            SearchAndPlaceState::RotateWristForGrasp => {
+                // Hold J0/J1/J2 at the retracted scan target; drive
+                // J3 from its scan-pose value (cumulative pitch 0,
+                // wrist level) to scan-J3 + π/2 (cumulative pitch
+                // π/2, wrist down). Only J3 moves; with the EE
+                // retracted ~30% radially, the wrist link's 5 cm arc
+                // sweeps in empty space well clear of the block.
+                let cxy = self.contact_xy.expect("contact_xy set on Sweeping exit");
+                let scan_target = self.retracted_scan_target(cxy);
+                let target = (
+                    scan_target.0,
+                    scan_target.1,
+                    scan_target.2,
+                    scan_target.3 + GRASP_WRIST_PITCH,
+                );
+                self.drive_joints_toward(target);
+                self.rotate_wrist_n += 1;
+                if self.rotate_wrist_n >= ROTATE_WRIST_TICKS
+                    && self.joints_converged_to(target)
+                {
+                    self.state = SearchAndPlaceState::ApproachOverContact;
+                }
+            }
+            SearchAndPlaceState::ApproachOverContact => {
+                // Drive EE from the retracted+rotated position back
+                // over `contact_xy` at `scan_z + APPROACH_DZ` in
+                // grasp pose (wrist down). This is a horizontal arc
+                // in joint space; fingers pass over the block at
+                // altitude before the descent commits.
+                let cxy = self.contact_xy.expect("contact_xy set on Sweeping exit");
+                let target = self.ik_target_for(cxy, self.scan_z + APPROACH_DZ);
+                self.drive_joints_toward(target);
+                if self.joints_converged_to(target) {
+                    self.state = SearchAndPlaceState::DescendToContact;
+                }
+            }
             SearchAndPlaceState::DescendToContact => {
                 let cxy = self.contact_xy.expect("contact_xy set on entry");
                 let target = self.ik_target_for(cxy, GRASP_Z);
-                self.drive_joints_toward(target);
+                // Slow descent (clamp 0.5 rad/s) so the EE arrives
+                // gently — Step 4.1 redesign: a 2 rad/s descent
+                // imparts enough lateral impulse via wrist-link side
+                // contact to knock the block 8+ cm before fingers can
+                // close around it.
+                self.drive_joints_toward_with_clamp(target, 0.5);
                 if self.joints_converged_to(target) {
                     self.state = SearchAndPlaceState::CloseGripper(0);
                 }
@@ -423,7 +603,10 @@ fn run_one_seed_with(
     }
     let ports = world.attach_standard_arm_ports();
     let ee_pose_rx = world.attach_ee_pose_sensor(RateHz::new(100));
-    let pressure_rx = world.attach_pressure_sensor(RateHz::new(1000), 0.03);
+    // Step 4.1: eps bumped from 0.03 → 0.06 m so the pressure sensor
+    // still reaches the block top (z=0.55) from the new
+    // finger-clearing scan altitude (0.60 m).
+    let pressure_rx = world.attach_pressure_sensor(RateHz::new(1000), 0.06);
     let block = block_id(&world);
     let bin = bin_id(&world);
 
@@ -435,7 +618,13 @@ fn run_one_seed_with(
         ports.gripper_tx,
         SEARCH_REGION_X,
         SEARCH_REGION_Y,
-        /* sweep_z */ 0.57,
+        // Step 4.1: scan altitude bumped from 0.57 → 0.60 m so the
+        // wrist-level fingers (which protrude ±0.04 m vertically
+        // around the EE in scan pose) clear the block top (z=0.55).
+        // Pair with an enlarged pressure-sensor eps so the sensor
+        // still reaches the block at this altitude.
+        /* scan_z */
+        0.60,
         /* stripe_dy */ 0.05,
         /* target_bin_xy */ (0.0, 0.6),
         /* arm_shoulder_z */ 0.8,
@@ -490,25 +679,13 @@ fn find_grasp_place_seed_1() {
     assert!(res.score.value > 0.9);
 }
 
-// Phase 3.5 scope-cut: seeds 42 and 1337 place the block at the far +x
-// corner of the search region (xy~(0.59, -0.16) and (0.60, -0.22)). With
-// Phase 3.4.5d's wrist-down geometry the fingers extend 8 cm below the EE,
-// and the sweep at z=0.57 ploughs through the block top before the
-// pressure-peak algorithm can localize it — peak xy lands several cm off
-// the actual block, descend misses, joint never forms. Seed 1 (block at
-// xy=(0.44, 0.02), close to the start of the sweep) still passes because
-// the block hasn't been pushed far by the time the EE sweeps over it.
-//
-// This is a controller / scene-geometry interaction issue, not a joint-
-// grasp issue (pick_place — same arm, same block, known xy — converges in
-// 5.4 s with score 1.0). Re-tuning find_grasp_place to be robust to the
-// new finger geometry needs a controller-level redesign (e.g., raise
-// sweep_z + widen pressure eps + use finger-tip distance instead of
-// EE-point distance, or change the sweep pose so fingers don't extend
-// below the EE during sweep). Tracked as future work; ignored for the
-// Step 3.5 commit so the V-gate test sweep stays green.
+// Step 4.1 redesign re-enabled the previously-ignored seeds: scan pose
+// (wrist level, target_pitch=0) keeps the fingers horizontal during
+// sweep so they no longer ploughs through the block top, and a
+// dedicated RotateWristForGrasp state pivots J3 from 0 → π/2 in place
+// after pressure-peak detection. See
+// `docs/plans/2026-05-08-sweep-controllers-redesign-plan.md`.
 #[test]
-#[ignore]
 fn find_grasp_place_seed_42() {
     let seed = 42_u64;
     let res = run_one_seed(seed, "find_grasp_place_seed_42");
@@ -526,7 +703,6 @@ fn find_grasp_place_seed_42() {
 }
 
 #[test]
-#[ignore]
 fn find_grasp_place_seed_1337() {
     let seed = 1337_u64;
     let res = run_one_seed(seed, "find_grasp_place_seed_1337");
@@ -548,7 +724,6 @@ fn find_grasp_place_seed_1337() {
 /// which materially changes per-tick work — this test asserts it's
 /// nonetheless cheap enough to still converge under the standard deadline.
 #[test]
-#[ignore]
 fn find_grasp_place_seed_42_with_debug_overlay() {
     let seed = 42_u64;
     let res = run_one_seed_with(seed, "find_grasp_place_seed_42_overlay", true);
@@ -610,7 +785,7 @@ mod search_and_place_tests {
             g_tx,
             SEARCH_REGION_X,
             SEARCH_REGION_Y,
-            /* sweep_z */ 0.57,
+            /* scan_z */ 0.60,
             stripe_dy,
             /* target_bin_xy */ (0.0, 0.6),
             /* arm_shoulder_z */ 0.8,
@@ -662,7 +837,7 @@ mod search_and_place_tests {
     }
 
     #[test]
-    fn sweep_waypoints_cover_region_in_serpentine_order() {
+    fn scan_waypoints_cover_region_in_serpentine_order() {
         // 5 cm stripes over y ∈ [-0.25, 0.25] → 11 stripes, each yielding
         // 2 endpoints = 22 waypoints. The first stripe goes left→right
         // (x_min then x_max), the second right→left, etc.
@@ -679,10 +854,24 @@ mod search_and_place_tests {
         assert!((wps.last().unwrap().1 - SEARCH_REGION_Y.1).abs() < 1e-6);
     }
 
+    /// Step 4.1: drive the rig past the new `LiftToScanAltitude` start
+    /// state by reporting joints already at the first scan waypoint —
+    /// one tick lands us in `Sweeping`. Inner-test helper used by the
+    /// state-machine tests below.
+    fn enter_sweeping(rig: &mut Rig) {
+        let wp0 = rig.c.scan_waypoints[0];
+        publish_encoders(rig, [wp0.0, wp0.1, wp0.2, wp0.3]);
+        publish_ee_xy(rig, (0.0, 0.0));
+        publish_pressure(rig, 0.0);
+        rig.c.step(Time::ZERO).unwrap();
+        assert!(matches!(rig.c.state(), SearchAndPlaceState::Sweeping));
+    }
+
     #[test]
     fn sweep_advances_waypoint_when_joints_converge() {
         let mut rig = make_rig();
-        let wp0 = rig.c.sweep_waypoints[0];
+        enter_sweeping(&mut rig);
+        let wp0 = rig.c.scan_waypoints[0];
         // Pretend joints have converged exactly to wp0.
         publish_encoders(&rig, [wp0.0, wp0.1, wp0.2, wp0.3]);
         publish_ee_xy(&rig, (0.4, -0.25));
@@ -694,24 +883,25 @@ mod search_and_place_tests {
     }
 
     #[test]
-    fn sweep_transitions_to_descend_after_pressure_peak_falls_off() {
+    fn sweep_transitions_to_lift_and_retract_after_pressure_peak_falls_off() {
         let mut rig = make_rig();
-        publish_encoders(&rig, [0.0, 0.0, 0.0, super::TARGET_WRIST_PITCH]);
+        enter_sweeping(&mut rig);
         // Tick 1: EE over the block at xy=(0.55, 0.10), pressure peaks
         // at 0.6. Peak gets recorded, but commit waits for pressure to
         // fall back below threshold.
+        publish_encoders(&rig, [0.0, 0.0, 0.0, 0.0]);
         publish_ee_xy(&rig, (0.55, 0.10));
         publish_pressure(&rig, 0.6);
         rig.c.step(Time::ZERO).unwrap();
         assert!(matches!(rig.c.state(), SearchAndPlaceState::Sweeping));
         // Tick 2: EE has moved past the block, pressure drops to 0.0 →
-        // controller commits to descending at the recorded peak xy.
+        // controller commits to lift-and-retract.
         publish_ee_xy(&rig, (0.60, 0.10));
         publish_pressure(&rig, 0.0);
         rig.c.step(Time::ZERO).unwrap();
         assert!(matches!(
             rig.c.state(),
-            SearchAndPlaceState::DescendToContact
+            SearchAndPlaceState::LiftAndRetract
         ));
         assert_eq!(rig.c.contact_xy, Some((0.55, 0.10)));
     }
@@ -721,10 +911,11 @@ mod search_and_place_tests {
         // Use a large stripe so we have only a couple of waypoints to
         // burn through.
         let mut rig = make_rig_with(/* stripe_dy = full region */ 0.5);
-        let n = rig.c.sweep_waypoints.len();
+        enter_sweeping(&mut rig);
+        let n = rig.c.scan_waypoints.len();
         // Force convergence to each waypoint in turn.
         for _ in 0..n {
-            let wp = rig.c.sweep_waypoints[rig.c.sweep_idx];
+            let wp = rig.c.scan_waypoints[rig.c.sweep_idx];
             publish_encoders(&rig, [wp.0, wp.1, wp.2, wp.3]);
             publish_ee_xy(&rig, (0.5, 0.0));
             publish_pressure(&rig, 0.0);
@@ -733,21 +924,59 @@ mod search_and_place_tests {
         assert!(matches!(rig.c.state(), SearchAndPlaceState::Failed));
     }
 
-    /// Drive the rig through Sweeping → DescendToContact: tick once with
-    /// pressure peaking at `contact_xy`, then a second tick with EE moved
-    /// past the block and pressure back to 0 to commit the descent.
+    /// Drive the rig through LiftToScanAltitude → Sweeping →
+    /// LiftAndRetract → RotateWristForGrasp → ApproachOverContact →
+    /// DescendToContact. Step 4.1: the wrist rotation phase requires
+    /// both `ROTATE_WRIST_TICKS` ticks AND joint convergence; the
+    /// approach phase then drives back to `contact_xy` in grasp pose.
     fn rig_at_descend(contact_xy: (f32, f32)) -> Rig {
         let mut rig = make_rig();
-        publish_encoders(&rig, [0.0, 0.0, 0.0, super::TARGET_WRIST_PITCH]);
+        enter_sweeping(&mut rig);
         // Peak: EE at contact_xy with pressure above threshold.
         publish_ee_xy(&rig, contact_xy);
         publish_pressure(&rig, 0.6);
         rig.c.step(Time::ZERO).unwrap();
         assert!(matches!(rig.c.state(), SearchAndPlaceState::Sweeping));
-        // Commit: EE has moved on (xy doesn't matter for the post-peak
-        // commit), pressure dropped back below threshold.
+        // Commit: pressure drops below threshold → LiftAndRetract.
         publish_ee_xy(&rig, (contact_xy.0 + 0.05, contact_xy.1));
         publish_pressure(&rig, 0.0);
+        rig.c.step(Time::ZERO).unwrap();
+        assert!(matches!(
+            rig.c.state(),
+            SearchAndPlaceState::LiftAndRetract
+        ));
+        // Retract completes: report joints at the retracted scan-pose
+        // target → next tick lands in RotateWristForGrasp.
+        let retracted = rig.c.retracted_scan_target(contact_xy);
+        publish_encoders(&rig, [retracted.0, retracted.1, retracted.2, retracted.3]);
+        rig.c.step(Time::ZERO).unwrap();
+        assert!(matches!(
+            rig.c.state(),
+            SearchAndPlaceState::RotateWristForGrasp
+        ));
+        // Drive RotateWristForGrasp to completion: report joints at
+        // the rotated target and tick past ROTATE_WRIST_TICKS →
+        // ApproachOverContact.
+        let rotated = (
+            retracted.0,
+            retracted.1,
+            retracted.2,
+            retracted.3 + super::GRASP_WRIST_PITCH,
+        );
+        publish_encoders(&rig, [rotated.0, rotated.1, rotated.2, rotated.3]);
+        for _ in 0..super::ROTATE_WRIST_TICKS + 2 {
+            rig.c.step(Time::ZERO).unwrap();
+        }
+        assert!(matches!(
+            rig.c.state(),
+            SearchAndPlaceState::ApproachOverContact
+        ));
+        // Approach completes: report joints at the grasp-pose
+        // approach target over contact_xy → DescendToContact.
+        let approach = rig
+            .c
+            .ik_target_for(contact_xy, rig.c.scan_z + super::APPROACH_DZ);
+        publish_encoders(&rig, [approach.0, approach.1, approach.2, approach.3]);
         rig.c.step(Time::ZERO).unwrap();
         assert!(matches!(
             rig.c.state(),
