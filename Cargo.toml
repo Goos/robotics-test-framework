@@ -19,11 +19,11 @@ rerun = { version = "0.21", default-features = false, features = ["sdk"] }
 # intentionally OFF — the rayon-driven steps are non-deterministic per
 # design v2 §10.
 #
-# `simd-stable` not enabled: confirmed empirically (2026-05-08) that
-# SIMD math diverges from scalar enough to break sensitive seed tests
-# (e.g., continuous_spawn_seed_42 went from 0.99 to 0.33). Determinism
-# between runs of the same binary holds, but determinism vs scalar
-# baseline does not.
+# rapier3d "simd-stable" not enabled: re-evaluated 2026-05-09 under
+# relaxed §10 (statistical determinism). Empirical wall-time on
+# find_grasp_place_seed_1 (warm cache, 22.5s sim time): 0.12-0.13s either
+# way (1.0x ratio). Rapier's SIMD lanes win at hundreds of bodies; our
+# scenes have ~6. Re-evaluate when scene complexity grows substantially.
 rapier3d = { version = "0.21", features = ["serde-serialize", "debug-render"] }
 
 [workspace.lints.clippy]
