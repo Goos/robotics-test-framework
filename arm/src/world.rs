@@ -815,6 +815,25 @@ impl ArmWorld {
                     let anchors_axes =
                         crate::fk::joint_anchors_axes(&self.arm.spec, &self.arm.state.q);
                     let n_joints = self.arm.spec.joints.len() as u32;
+
+                    // Pre-compute the gravity-load contribution from each
+                    // grasped object: a (com_world, force_world) pair where
+                    // force = m·g in world coordinates. The torque sensor
+                    // would otherwise read 0 for FixedJoint-grasped objects
+                    // because the constraint force never shows up as a
+                    // contact impulse.
+                    let gravity = self.physics.gravity();
+                    let grasp_loads: Vec<(nalgebra::Point3<f32>, nalgebra::Vector3<f32>)> = self
+                        .physics
+                        .grasped_object_ids()
+                        .filter_map(|id| {
+                            let obj = self.scene.object(id)?;
+                            let com = nalgebra::Point3::from(obj.pose.translation.vector);
+                            let force = gravity * obj.mass;
+                            Some((com, force))
+                        })
+                        .collect();
+
                     for pubr in self.sensors_torque.values_mut() {
                         if !pubr.scheduler.tick(dt_ns) {
                             continue;
@@ -825,6 +844,7 @@ impl ArmWorld {
                         }
                         let (anchor, axis) = anchors_axes[i as usize];
                         let mut tau = 0.0_f32;
+                        // Direct link-collider contact contributions.
                         for c in &contacts {
                             if c.link_slot < i || c.link_slot >= n_joints {
                                 continue;
@@ -832,6 +852,13 @@ impl ArmWorld {
                             let r = c.point_world - anchor;
                             let force = c.impulse_world / dt_eff;
                             let moment = r.cross(&force);
+                            tau += axis.dot(&moment);
+                        }
+                        // Grasped-object gravity contributions. Every joint
+                        // upstream of the wrist supports the load.
+                        for (com, force) in &grasp_loads {
+                            let r = com - anchor;
+                            let moment = r.cross(force);
                             tau += axis.dot(&moment);
                         }
                         pubr.tx.send(JointTorqueReading {

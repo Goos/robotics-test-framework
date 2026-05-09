@@ -40,16 +40,32 @@ fn shape_to_collider(shape: &Shape) -> ColliderBuilder {
         Shape::Aabb { half_extents } => {
             ColliderBuilder::cuboid(half_extents.x, half_extents.y, half_extents.z)
         }
-        // rapier3d 0.21 has a primitive `cylinder(half_height, radius)` —
-        // simpler than the plan's capsule_z fallback. Cylinder long axis
-        // is +y in parry convention; align it with our +z by rotating
-        // the collider 90° about the x axis at insertion time. (For now
-        // we accept the +y-aligned cylinder; the only user is `Shape::Cylinder`
-        // and our v1.x test scene never uses it.)
+        // rapier3d 0.21's primitive `cylinder(half_height, radius)` is
+        // long-axis-aligned with parry's +y convention, but every consumer
+        // in this codebase (and the visualizer's `Primitive::Capsule`
+        // mapping) treats `Shape::Cylinder`'s long axis as +z. Without the
+        // rotation the body and its renderer disagree on which axis is
+        // "long", which manifests in rerun as a propeller-style spin when
+        // the dynamic cylinder rolls under gravity (the body integrates
+        // about its real +y axis, the visualizer transforms +z, and the
+        // two only coincide when the pose has identity rotation).
+        //
+        // Fix: rotate the collider 90° about local +x so its long axis
+        // sits along the body's +z. The body's pose rotation then maps
+        // directly to the rendered cylinder's long axis, matching the
+        // visualizer's assumption.
         Shape::Cylinder {
             radius,
             half_height,
-        } => ColliderBuilder::cylinder(*half_height, *radius),
+        } => {
+            use nalgebra::{Translation3, UnitQuaternion, Vector3};
+            let q = UnitQuaternion::from_axis_angle(
+                &Vector3::x_axis(),
+                std::f32::consts::FRAC_PI_2,
+            );
+            ColliderBuilder::cylinder(*half_height, *radius)
+                .position(Isometry3::from_parts(Translation3::identity(), q))
+        }
     }
 }
 
@@ -559,6 +575,15 @@ impl PhysicsWorld {
     /// without computing the norm.
     pub fn has_grasp_joint(&self, obj_id: ObjectId) -> bool {
         self.grasp_joints.contains_key(&obj_id)
+    }
+
+    /// IDs of every object currently held by a grasp `FixedJoint`. Used by
+    /// the joint-torque sensor so a grasped object's gravity load
+    /// propagates back as a virtual contact moment on each upstream joint
+    /// — without this, FixedJoint-grasped objects produce zero contact
+    /// impulse on the arm-link colliders and the torque sensor reads 0.
+    pub fn grasped_object_ids(&self) -> impl Iterator<Item = ObjectId> + '_ {
+        self.grasp_joints.keys().copied()
     }
 
     /// Iterate every contact pair touching a link of arm `arm_id`.
