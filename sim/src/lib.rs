@@ -4,6 +4,7 @@ pub mod entity;
 pub mod faults;
 pub mod fixture;
 pub mod object;
+pub mod palette;
 pub mod physics;
 pub mod primitive;
 pub mod rate_scheduler;

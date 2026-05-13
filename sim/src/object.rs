@@ -1,11 +1,6 @@
 use nalgebra::{Isometry3, Vector3};
 
-use crate::{
-    entity::EntityId,
-    primitive::{Color, Primitive},
-    shape::Shape,
-    visualizable::Visualizable,
-};
+use crate::{entity::EntityId, primitive::Primitive, shape::Shape, visualizable::Visualizable};
 
 /// Stable identifier for a movable simulation object (design v2 §5.2).
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -94,12 +89,12 @@ impl Visualizable for Object {
             Shape::Sphere { radius } => Primitive::Sphere {
                 pose: self.pose,
                 radius: *radius,
-                color: Color::WHITE,
+                color: crate::palette::block_color(self.id.0),
             },
             Shape::Aabb { half_extents } => Primitive::Box {
                 pose: self.pose,
                 half_extents: *half_extents,
-                color: Color::WHITE,
+                color: crate::palette::block_color(self.id.0),
             },
             Shape::Cylinder {
                 radius,
@@ -108,7 +103,7 @@ impl Visualizable for Object {
                 pose: self.pose,
                 half_height: *half_height,
                 radius: *radius,
-                color: Color::WHITE,
+                color: crate::palette::block_color(self.id.0),
             },
         };
         out.push((EntityId::Object(self.id.0), prim));
@@ -149,5 +144,31 @@ mod tests {
         o.append_primitives(&mut out);
         assert_eq!(out.len(), 1);
         assert!(matches!(out[0].1, Primitive::Sphere { .. }));
+    }
+
+    #[test]
+    fn object_append_primitives_uses_palette_color() {
+        use crate::palette::block_color;
+        use crate::primitive::Primitive;
+        use crate::shape::Shape;
+        use crate::visualizable::Visualizable;
+        use nalgebra::Isometry3;
+
+        let obj = Object::new(
+            ObjectId(2),
+            Isometry3::identity(),
+            Shape::Aabb {
+                half_extents: nalgebra::Vector3::new(0.025, 0.025, 0.025),
+            },
+            /* mass */ 0.1,
+            /* graspable */ true,
+        );
+        let mut prims = Vec::new();
+        obj.append_primitives(&mut prims);
+        let color = match &prims[0].1 {
+            Primitive::Box { color, .. } => *color,
+            other => panic!("expected Primitive::Box for Aabb shape, got {other:?}"),
+        };
+        assert_eq!(color, block_color(2));
     }
 }

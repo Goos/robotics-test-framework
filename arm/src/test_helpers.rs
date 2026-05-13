@@ -81,7 +81,7 @@ pub fn build_pick_and_place_world() -> ArmWorld {
             half_extents: Vector3::new(0.4, 0.4, 0.025),
         },
         is_support: true,
-        color: Color::WHITE,
+        color: rtf_sim::palette::TABLE_GRAY,
     });
 
     scene.add_fixture(Fixture {
@@ -187,7 +187,7 @@ pub fn build_search_world(seed: u64) -> ArmWorld {
             half_extents: Vector3::new(0.4, 0.4, 0.025),
         },
         is_support: true,
-        color: Color::WHITE,
+        color: rtf_sim::palette::TABLE_GRAY,
     });
 
     scene.add_fixture(Fixture {
