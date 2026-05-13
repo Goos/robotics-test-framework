@@ -20,6 +20,7 @@ pub struct Fixture {
     pub pose: Isometry3<f32>,
     pub shape: Shape,
     pub is_support: bool,
+    pub color: Color,
 }
 
 impl Visualizable for Fixture {
@@ -28,12 +29,12 @@ impl Visualizable for Fixture {
             Shape::Sphere { radius } => Primitive::Sphere {
                 pose: self.pose,
                 radius: *radius,
-                color: Color::WHITE,
+                color: self.color,
             },
             Shape::Aabb { half_extents } => Primitive::Box {
                 pose: self.pose,
                 half_extents: *half_extents,
-                color: Color::WHITE,
+                color: self.color,
             },
             Shape::Cylinder {
                 radius,
@@ -42,7 +43,7 @@ impl Visualizable for Fixture {
                 pose: self.pose,
                 half_height: *half_height,
                 radius: *radius,
-                color: Color::WHITE,
+                color: self.color,
             },
         };
         out.push((EntityId::Fixture(self.id), prim));
@@ -66,6 +67,7 @@ mod tests {
                 half_extents: Vector3::new(0.5, 0.5, 0.05),
             },
             is_support: true,
+            color: Color::WHITE,
         };
         let mut out = Vec::new();
         f.append_primitives(&mut out);

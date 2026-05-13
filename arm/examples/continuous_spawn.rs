@@ -48,6 +48,7 @@ use rtf_sim::{
     faults::PcgNoiseSource,
     fixture::Fixture,
     object::{Object, ObjectId, ObjectState, SupportId},
+    primitive::Color,
     scene::Scene,
     shape::Shape,
 };
@@ -657,6 +658,7 @@ fn build_continuous_spawn_world(seed: u64, n_spawns: u32, interval: Duration) ->
             half_extents: Vector3::new(0.4, 0.4, 0.025),
         },
         is_support: true,
+        color: Color::WHITE,
     });
 
     // Bin fixture.
@@ -667,6 +669,7 @@ fn build_continuous_spawn_world(seed: u64, n_spawns: u32, interval: Duration) ->
             half_extents: Vector3::new(0.1, 0.1, 0.05),
         },
         is_support: true,
+        color: Color::WHITE,
     });
 
     // Phase 3.4.5b: same Z-Y-Y-Y geometry as build_pick_and_place_world

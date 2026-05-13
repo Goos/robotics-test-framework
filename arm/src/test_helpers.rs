@@ -7,6 +7,7 @@ use rtf_core::port::{PortReader, PortRx, PortTx};
 use rtf_sim::{
     fixture::Fixture,
     object::{Object, ObjectId, ObjectState, SupportId},
+    primitive::Color,
     scene::Scene,
     shape::Shape,
 };
@@ -80,6 +81,7 @@ pub fn build_pick_and_place_world() -> ArmWorld {
             half_extents: Vector3::new(0.4, 0.4, 0.025),
         },
         is_support: true,
+        color: Color::WHITE,
     });
 
     scene.add_fixture(Fixture {
@@ -89,6 +91,7 @@ pub fn build_pick_and_place_world() -> ArmWorld {
             half_extents: Vector3::new(0.1, 0.1, 0.05),
         },
         is_support: true,
+        color: Color::WHITE,
     });
 
     scene.insert_object(Object {
@@ -184,6 +187,7 @@ pub fn build_search_world(seed: u64) -> ArmWorld {
             half_extents: Vector3::new(0.4, 0.4, 0.025),
         },
         is_support: true,
+        color: Color::WHITE,
     });
 
     scene.add_fixture(Fixture {
@@ -193,6 +197,7 @@ pub fn build_search_world(seed: u64) -> ArmWorld {
             half_extents: Vector3::new(0.1, 0.1, 0.05),
         },
         is_support: true,
+        color: Color::WHITE,
     });
 
     scene.insert_object(Object {

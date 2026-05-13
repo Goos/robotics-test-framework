@@ -7,6 +7,7 @@ use rand_pcg::Pcg64;
 use crate::{
     fixture::Fixture,
     object::{Object, ObjectId, ObjectState, SupportId},
+    primitive::Color,
     shape::Shape,
 };
 
@@ -125,6 +126,7 @@ impl Scene {
                 half_extents: Vector3::new(1000.0, 1000.0, 0.5),
             },
             is_support: true,
+            color: Color::WHITE,
         });
         s
     }

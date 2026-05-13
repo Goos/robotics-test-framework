@@ -15,6 +15,7 @@ use rtf_core::time::Duration;
 use rtf_sim::{
     fixture::Fixture,
     object::{Object, ObjectId, ObjectState},
+    primitive::Color,
     scene::Scene,
     shape::Shape,
 };
@@ -32,6 +33,7 @@ fn object_grasped_then_released_falls_to_table() {
             half_extents: Vector3::new(0.4, 0.4, 0.025),
         },
         is_support: true,
+        color: Color::WHITE,
     });
 
     // Spec-intended geometry: three x-axis link offsets, EE at (0.6, 0, 0).

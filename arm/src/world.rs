@@ -1707,6 +1707,7 @@ mod tests {
                 half_extents: Vector3::new(1.0, 1.0, 0.05),
             },
             is_support: true,
+            color: rtf_sim::primitive::Color::WHITE,
         });
         scene.insert_object(Object::new(
             ObjectId(1),
@@ -1897,6 +1898,7 @@ mod tests {
                 half_extents: Vector3::new(1.0, 1.0, 0.05),
             },
             is_support: true,
+            color: rtf_sim::primitive::Color::WHITE,
         });
         scene.insert_object(Object::new(
             ObjectId(1),
@@ -2264,6 +2266,7 @@ mod tests {
                 half_extents: Vector3::new(0.4, 0.4, 0.025),
             },
             is_support: true,
+            color: rtf_sim::primitive::Color::WHITE,
         });
         let mut world = ArmWorld::new(scene, spec, /* gravity */ false);
         let rx = world.attach_pressure_sensor(RateHz::new(1000), 0.03);
@@ -2298,6 +2301,7 @@ mod tests {
                 half_extents: Vector3::new(0.5, 0.5, 0.01),
             },
             is_support: true,
+            color: rtf_sim::primitive::Color::WHITE,
         });
         let block = ObjectId(1);
         scene.insert_object(Object::new(
@@ -2442,6 +2446,7 @@ mod tests {
                 half_extents: Vector3::new(2.0, 2.0, 0.05),
             },
             is_support: true,
+            color: rtf_sim::primitive::Color::WHITE,
         });
         let mut world = ArmWorld::new(scene, simple_spec(), /* gravity */ true);
 

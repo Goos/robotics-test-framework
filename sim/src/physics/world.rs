@@ -779,6 +779,7 @@ mod tests {
                 half_extents: nalgebra::Vector3::new(0.4, 0.4, 0.025),
             },
             is_support: true,
+            color: crate::primitive::Color::WHITE,
         };
         let h = pw.insert_fixture(&fix);
         assert_eq!(pw.body_type(h), Some(RigidBodyType::Fixed));
@@ -851,6 +852,7 @@ mod tests {
                 half_extents: nalgebra::Vector3::new(2.0, 2.0, 0.05),
             },
             is_support: true,
+            color: crate::primitive::Color::WHITE,
         };
         scene.add_fixture(fix.clone());
         pw.insert_fixture(&fix);
