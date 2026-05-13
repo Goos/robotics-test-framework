@@ -1,6 +1,6 @@
 use nalgebra::{Isometry3, Translation3, UnitQuaternion, Vector3};
 use rtf_sim::entity::EntityId;
-use rtf_sim::primitive::{Color, Primitive};
+use rtf_sim::primitive::Primitive;
 use rtf_sim::visualizable::Visualizable;
 
 use crate::fk::joint_transform;
@@ -71,6 +71,41 @@ impl Arm {
                 kind: DecorationKind::Static,
             });
         }
+        // Joint barrels at each revolute joint origin + wrist cuff at the
+        // EE. The barrel's local +Z aligns with the joint's rotation axis,
+        // so a Z-axis (yaw) joint reads as a horizontal disc and a Y-axis
+        // (pitch) joint reads as a vertical disc — matches the reference
+        // robot arm visual.
+        let mut acc = Isometry3::identity();
+        for (i, joint) in self.spec.joints.iter().enumerate() {
+            if let crate::spec::JointSpec::Revolute { axis, .. } = joint {
+                let z_to_axis = UnitQuaternion::rotation_between(&Vector3::z(), axis)
+                    .unwrap_or_else(UnitQuaternion::identity);
+                out.push(DecorationPose {
+                    slot: JOINT_BARREL_SLOT_BASE + i as u32,
+                    shape: rtf_sim::shape::Shape::Cylinder {
+                        radius: JOINT_BARREL_RADIUS,
+                        half_height: JOINT_BARREL_HALF_LENGTH,
+                    },
+                    pose: acc * Isometry3::from_parts(Translation3::identity(), z_to_axis),
+                    color: rtf_sim::palette::JOINT_BLACK,
+                    kind: DecorationKind::Kinematic,
+                });
+            }
+            acc *= crate::fk::joint_transform(joint, self.state.q[i]);
+            acc *= self.spec.link_offsets[i];
+        }
+        // Wrist cuff at the EE pose (post-FK accumulator).
+        out.push(DecorationPose {
+            slot: WRIST_CUFF_SLOT,
+            shape: rtf_sim::shape::Shape::Cylinder {
+                radius: WRIST_CUFF_RADIUS,
+                half_height: WRIST_CUFF_HALF_LENGTH,
+            },
+            pose: acc,
+            color: rtf_sim::palette::JOINT_BLACK,
+            kind: DecorationKind::Kinematic,
+        });
         out
     }
 
@@ -270,7 +305,7 @@ impl Visualizable for Arm {
                 Primitive::Box {
                     pose: finger_pose(acc, slot, separation),
                     half_extents: FINGER_HALF_EXTENTS,
-                    color: Color::RED,
+                    color: rtf_sim::palette::JOINT_BLACK,
                 },
             ));
         }
@@ -305,7 +340,6 @@ mod tests {
             id: 0,
         };
         let decos = arm.decoration_poses();
-        assert_eq!(decos.len(), 2, "C5 emits foot + column only");
         let foot = decos.iter().find(|d| d.slot == BASE_FOOT_SLOT).unwrap();
         let column = decos.iter().find(|d| d.slot == BASE_COLUMN_SLOT).unwrap();
         // Foot top at z = 0.030 (foot_center=0.015 + half_height=0.015).
@@ -317,8 +351,44 @@ mod tests {
     }
 
     #[test]
-    fn decoration_poses_empty_for_non_standard_pedestal() {
-        // Minimal test arm with link_offsets[0].z != 0.8 → no foot/column.
+    fn decoration_poses_emits_barrel_per_revolute_joint_plus_cuff() {
+        // Standard 3-revolute arm — emits foot + column + 3 barrels + cuff.
+        let spec = ArmSpec {
+            joints: vec![
+                JointSpec::Revolute {
+                    axis: Vector3::z_axis(),
+                    limits: (-3.2, 3.2),
+                };
+                3
+            ],
+            link_offsets: vec![
+                Isometry3::translation(0.0, 0.0, 0.8),
+                Isometry3::translation(0.4, 0.0, 0.0),
+                Isometry3::translation(0.4, 0.0, 0.0),
+            ],
+            gripper: GripperSpec {
+                proximity_threshold: 0.02,
+                max_grasp_size: 0.05,
+            },
+        };
+        let arm = Arm {
+            spec,
+            state: ArmState::zeros(3),
+            id: 0,
+        };
+        let decos = arm.decoration_poses();
+        let barrels: Vec<_> = decos
+            .iter()
+            .filter(|d| d.slot >= JOINT_BARREL_SLOT_BASE && d.slot < JOINT_BARREL_SLOT_BASE + 100)
+            .collect();
+        assert_eq!(barrels.len(), 3, "one barrel per revolute joint");
+        assert!(decos.iter().any(|d| d.slot == WRIST_CUFF_SLOT));
+    }
+
+    #[test]
+    fn decoration_poses_skips_foot_column_for_non_standard_pedestal() {
+        // Minimal test arm with link_offsets[0].z != 0.8 → no foot/column,
+        // but still gets per-joint barrels + a cuff.
         let spec = ArmSpec {
             joints: vec![JointSpec::Revolute {
                 axis: Vector3::z_axis(),
@@ -335,11 +405,21 @@ mod tests {
             state: ArmState::zeros(1),
             id: 0,
         };
-        assert_eq!(arm.decoration_poses().len(), 0);
+        let decos = arm.decoration_poses();
+        assert!(decos.iter().all(|d| d.slot != BASE_FOOT_SLOT));
+        assert!(decos.iter().all(|d| d.slot != BASE_COLUMN_SLOT));
+        assert_eq!(
+            decos.len(),
+            2,
+            "1 barrel + 1 cuff (no foot/column for non-0.8 pedestal)"
+        );
     }
 
     #[test]
-    fn appends_n_capsules_and_two_finger_boxes() {
+    fn appends_link_capsules_decorations_and_finger_boxes() {
+        // Minimal 3-joint arm (non-standard pedestal): 3 link capsules
+        // + 3 joint barrels + 1 wrist cuff = 7 capsules; 2 finger boxes;
+        // foot/column skipped for non-0.8 pedestal.
         let spec = ArmSpec {
             joints: vec![
                 JointSpec::Revolute {
@@ -366,8 +446,8 @@ mod tests {
             .iter()
             .filter(|(_, p)| matches!(p, Primitive::Box { .. }))
             .count();
-        assert_eq!(n_capsules, 3);
-        assert_eq!(n_boxes, 2);
+        assert_eq!(n_capsules, 7, "3 link + 3 barrel + 1 cuff");
+        assert_eq!(n_boxes, 2, "2 finger boxes");
     }
 
     #[test]

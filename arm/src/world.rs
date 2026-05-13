@@ -506,6 +506,15 @@ impl ArmWorld {
                 self.physics
                     .set_arm_link_pose(self.arm.id, link.slot, link.pose);
             }
+            // C6: sync kinematic decoration poses (joint barrels + wrist
+            // cuff). Static decorations (foot, column) are no-ops since
+            // their bodies are RigidBodyType::Fixed.
+            for d in self.arm.decoration_poses() {
+                if matches!(d.kind, rtf_sim::physics::world::DecorationKind::Kinematic) {
+                    self.physics
+                        .set_arm_decoration_pose(self.arm.id, d.slot, d.pose);
+                }
+            }
             // Phase 3.1: refresh finger poses too. Use the current EE
             // pose (post-FK) and current gripper_separation so the
             // finger colliders stay welded to the EE every tick.
@@ -1194,14 +1203,19 @@ mod tests {
     #[cfg(feature = "physics-rapier")]
     #[test]
     fn armworld_with_physics_feature_owns_physics_world_with_all_bodies() {
-        // Empty scene + 2-joint simple_spec = 2 arm-link bodies, 0
-        // fixtures, 0 objects, +2 finger bodies (Phase 3.1) →
-        // physics body_count == 4.
+        // Empty scene + 2-joint simple_spec → 2 arm-link bodies + 2 finger
+        // bodies + per-joint decorations (C5/C6: 2 joint barrels + 1 wrist
+        // cuff). Foot/column NOT emitted (simple_spec has non-0.8 pedestal).
         let world = ArmWorld::new(Scene::new(0), simple_spec(), true);
+        let n_joints = simple_spec().joints.len();
+        let expected = n_joints     // link bodies
+            + 2                     // fingers
+            + n_joints              // joint barrels (one per revolute)
+            + 1; // wrist cuff
         assert_eq!(
             world.physics().body_count(),
-            simple_spec().joints.len() + 2,
-            "expected one body per arm link plus 2 finger bodies"
+            expected,
+            "expected {n_joints} link + 2 finger + {n_joints} barrel + 1 cuff"
         );
     }
 
@@ -1719,8 +1733,10 @@ mod tests {
         });
         scene.insert_object(Object::new(
             ObjectId(1),
-            // Sphere centre at z = fixture_top + radius = 0.05 + 0.05 = 0.10.
-            Isometry3::translation(0.0, 0.0, 0.10),
+            // Sphere on the fixture, OFFSET in xy to clear simple_spec()'s
+            // joint barrels (which sit at the chain's z-axis xy=(0,0) by
+            // C6). The fixture is 1m × 1m, so 0.5 is comfortably on top.
+            Isometry3::translation(0.5, 0.0, 0.10),
             Shape::Sphere { radius: 0.05 },
             0.1,
             true,
@@ -1917,9 +1933,10 @@ mod tests {
         ));
 
         let world = ArmWorld::new(scene, simple_spec(), true);
-        // 1 fixture + 1 object + 2 arm-link bodies + 2 finger bodies
-        // (Phase 3.1) = 6 total.
-        assert_eq!(world.physics().body_count(), 6);
+        // 1 fixture + 1 object + 2 arm-link + 2 finger + 2 joint barrel +
+        // 1 wrist cuff (C5/C6) = 9 total. Foot/column not emitted for
+        // simple_spec (non-0.8 pedestal).
+        assert_eq!(world.physics().body_count(), 9);
     }
 
     #[test]

@@ -557,6 +557,21 @@ impl PhysicsWorld {
         }
     }
 
+    /// Update the kinematic-body pose for an arm decoration (joint barrel,
+    /// wrist cuff). Called each tick from the FK→pose-sync loop. No-op
+    /// for static decorations (foot/column) — their handles are inserted
+    /// as `RigidBodyType::Fixed` and `set_next_kinematic_position` is a
+    /// no-op for fixed bodies. Silently no-ops if the (arm_id, slot)
+    /// wasn't inserted.
+    pub fn set_arm_decoration_pose(&mut self, arm_id: u32, slot: u32, pose: Isometry3<f32>) {
+        let Some(handle) = self.arm_decoration_bodies.get(&(arm_id, slot)).copied() else {
+            return;
+        };
+        if let Some(body) = self.rigid_body_set.get_mut(handle) {
+            body.set_next_kinematic_position(pose);
+        }
+    }
+
     /// Switch an Object's Rapier body to KinematicPositionBased and
     /// weld it to `pose`. Phase 1's grasp model
     /// (rapier-integration design §6 / §11.1): the grasped object stops
@@ -968,6 +983,50 @@ mod tests {
         assert!(
             (final_z - 0.55).abs() < 0.005,
             "expected sphere to settle near z=0.55, got z={final_z}"
+        );
+    }
+
+    #[test]
+    fn torque_sensor_ignores_decoration_contacts() {
+        // Insert a kinematic decoration (foot) that physically overlaps a
+        // dynamic object. Step the world; assert arm_link_external_contacts
+        // is empty for that arm. This pins the design §8.1 invariant:
+        // arm_decoration_bodies is a separate map, so the torque sensor's
+        // arm_link_slot_for lookup never returns a slot for a decoration
+        // collider — even when the decoration is in heavy contact with
+        // an object.
+        let mut pw = PhysicsWorld::new(true);
+        // Foot at world origin (kinematic, since static would skip
+        // contact-graph reporting in some Rapier modes; either way the
+        // sensor isolation must hold).
+        pw.insert_arm_decoration(
+            0,
+            990, // BASE_FOOT_SLOT (mirrored from arm/src/arm.rs)
+            DecorationKind::Kinematic,
+            &Shape::Cylinder {
+                radius: 0.10,
+                half_height: 0.015,
+            },
+            Isometry3::translation(0.0, 0.0, 0.015),
+        );
+        // Object placed inside the foot's footprint, expected to land
+        // on top of it under gravity.
+        let mut obj = Object::new(
+            ObjectId(1),
+            Isometry3::translation(0.0, 0.0, 0.10),
+            Shape::Sphere { radius: 0.02 },
+            0.1,
+            true,
+        );
+        obj.friction = 2.0;
+        pw.insert_object(&obj);
+        for _ in 0..200 {
+            pw.step(0.001);
+        }
+        let contacts = pw.arm_link_external_contacts(0);
+        assert!(
+            contacts.is_empty(),
+            "decoration contact should NOT surface as a link contact: {contacts:?}",
         );
     }
 
