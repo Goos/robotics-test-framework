@@ -7,7 +7,6 @@ use rtf_core::port::{PortReader, PortRx, PortTx};
 use rtf_sim::{
     fixture::Fixture,
     object::{Object, ObjectId, ObjectState, SupportId},
-    primitive::Color,
     scene::Scene,
     shape::Shape,
 };
@@ -84,15 +83,22 @@ pub fn build_pick_and_place_world() -> ArmWorld {
         color: rtf_sim::palette::TABLE_GRAY,
     });
 
-    scene.add_fixture(Fixture {
-        id: BIN_FIXTURE_ID,
-        pose: Isometry3::translation(0.0, 0.6, 0.55),
-        shape: Shape::Aabb {
-            half_extents: Vector3::new(0.1, 0.1, 0.05),
-        },
-        is_support: true,
-        color: Color::WHITE,
-    });
+    let bin_pose = Isometry3::translation(0.0, 0.6, 0.60); // rim TOP per design §7.3
+    let bin_parts = rtf_sim::fixture::bin_decomposition(
+        bin_pose,
+        nalgebra::Vector2::new(0.10, 0.10),
+        /* inner_depth */ 0.08,
+        /* wall_thickness */ 0.01,
+    );
+    for (i, (pose, he)) in bin_parts.iter().enumerate() {
+        scene.add_fixture(Fixture {
+            id: BIN_FIXTURE_ID + i as u32,
+            pose: *pose,
+            shape: Shape::Aabb { half_extents: *he },
+            is_support: i == 0, // only the floor is a settled-on support
+            color: rtf_sim::palette::BIN_GRAY,
+        });
+    }
 
     scene.insert_object(Object {
         id: BLOCK_OBJECT_ID,
@@ -154,6 +160,10 @@ pub fn build_pick_and_place_world() -> ArmWorld {
 pub fn block_id(_world: &ArmWorld) -> ObjectId {
     BLOCK_OBJECT_ID
 }
+/// Returns the bin's **floor** fixture id. Post-Commit 4 the bin is 5
+/// fixtures (floor + 4 walls) at ids `BIN_FIXTURE_ID..BIN_FIXTURE_ID+5`;
+/// only the floor is `is_support: true`, so this is the id used as the
+/// place target by pick-and-place controllers.
 pub fn bin_id(_world: &ArmWorld) -> u32 {
     BIN_FIXTURE_ID
 }
@@ -190,15 +200,22 @@ pub fn build_search_world(seed: u64) -> ArmWorld {
         color: rtf_sim::palette::TABLE_GRAY,
     });
 
-    scene.add_fixture(Fixture {
-        id: BIN_FIXTURE_ID,
-        pose: Isometry3::translation(0.0, 0.6, 0.55),
-        shape: Shape::Aabb {
-            half_extents: Vector3::new(0.1, 0.1, 0.05),
-        },
-        is_support: true,
-        color: Color::WHITE,
-    });
+    let bin_pose = Isometry3::translation(0.0, 0.6, 0.60); // rim TOP per design §7.3
+    let bin_parts = rtf_sim::fixture::bin_decomposition(
+        bin_pose,
+        nalgebra::Vector2::new(0.10, 0.10),
+        /* inner_depth */ 0.08,
+        /* wall_thickness */ 0.01,
+    );
+    for (i, (pose, he)) in bin_parts.iter().enumerate() {
+        scene.add_fixture(Fixture {
+            id: BIN_FIXTURE_ID + i as u32,
+            pose: *pose,
+            shape: Shape::Aabb { half_extents: *he },
+            is_support: i == 0,
+            color: rtf_sim::palette::BIN_GRAY,
+        });
+    }
 
     scene.insert_object(Object {
         id: BLOCK_OBJECT_ID,
@@ -312,7 +329,8 @@ mod tests {
     #[test]
     fn pick_and_place_world_has_table_bin_and_block() {
         let world = build_pick_and_place_world();
-        assert_eq!(world.scene.fixtures().count(), 3);
+        // ground + table + 5 bin pieces (floor + 4 walls) = 7
+        assert_eq!(world.scene.fixtures().count(), 7);
         assert!(world.scene.object(BLOCK_OBJECT_ID).is_some());
         assert_eq!(block_id(&world), BLOCK_OBJECT_ID);
         assert_eq!(bin_id(&world), BIN_FIXTURE_ID);

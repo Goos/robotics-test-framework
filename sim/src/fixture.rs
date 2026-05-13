@@ -1,4 +1,4 @@
-use nalgebra::Isometry3;
+use nalgebra::{Isometry3, Vector2, Vector3};
 
 use crate::{
     entity::EntityId,
@@ -50,6 +50,61 @@ impl Visualizable for Fixture {
     }
 }
 
+/// Decompose a bin spec into the (pose, half_extents) of its 5 box pieces:
+/// `[floor, +x wall, -x wall, +y wall, -y wall]`.
+///
+/// `rim_center.translation.z` is the **top z** of the rim — matches today's
+/// slab-top z so the place-target z invariant holds (design §7.3). The floor
+/// sits `inner_depth` below the rim; walls extend from floor top to rim top.
+/// Caller wraps each tuple as a `Fixture` with its own id and color.
+pub fn bin_decomposition(
+    rim_center: Isometry3<f32>,
+    inner_half_extents_xy: Vector2<f32>,
+    inner_depth: f32,
+    wall_thickness: f32,
+) -> [(Isometry3<f32>, Vector3<f32>); 5] {
+    let rim_z = rim_center.translation.z;
+    let floor_top_z = rim_z - inner_depth;
+    let floor_half_thickness = wall_thickness * 0.5;
+    let floor_center_z = floor_top_z - floor_half_thickness;
+    let wall_center_z = (rim_z + floor_top_z) * 0.5;
+    let wall_half_height = inner_depth * 0.5;
+    let inner_x = inner_half_extents_xy.x;
+    let inner_y = inner_half_extents_xy.y;
+    let outer_y = inner_y + wall_thickness;
+
+    let center_xy = rim_center.translation.vector.xy();
+    let mk = |dx: f32, dy: f32, dz: f32| {
+        let mut p = rim_center;
+        p.translation.x = center_xy.x + dx;
+        p.translation.y = center_xy.y + dy;
+        p.translation.z = dz;
+        p
+    };
+    [
+        (
+            mk(0.0, 0.0, floor_center_z),
+            Vector3::new(inner_x, inner_y, floor_half_thickness),
+        ),
+        (
+            mk(inner_x + wall_thickness * 0.5, 0.0, wall_center_z),
+            Vector3::new(wall_thickness * 0.5, outer_y, wall_half_height),
+        ),
+        (
+            mk(-(inner_x + wall_thickness * 0.5), 0.0, wall_center_z),
+            Vector3::new(wall_thickness * 0.5, outer_y, wall_half_height),
+        ),
+        (
+            mk(0.0, inner_y + wall_thickness * 0.5, wall_center_z),
+            Vector3::new(inner_x, wall_thickness * 0.5, wall_half_height),
+        ),
+        (
+            mk(0.0, -(inner_y + wall_thickness * 0.5), wall_center_z),
+            Vector3::new(inner_x, wall_thickness * 0.5, wall_half_height),
+        ),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -73,5 +128,37 @@ mod tests {
         f.append_primitives(&mut out);
         assert_eq!(out.len(), 1);
         assert!(matches!(out[0].1, Primitive::Box { .. }));
+    }
+}
+
+#[cfg(test)]
+mod bin_tests {
+    use super::*;
+    use nalgebra::{Translation3, UnitQuaternion};
+
+    #[test]
+    fn bin_decomposition_floor_top_is_inner_depth_below_rim() {
+        let pose = Isometry3::from_parts(
+            Translation3::new(0.5, -0.3, 0.6),
+            UnitQuaternion::identity(),
+        );
+        let parts = bin_decomposition(pose, Vector2::new(0.10, 0.10), 0.08, 0.01);
+        let (floor_pose, floor_he) = &parts[0];
+        let floor_top_z = floor_pose.translation.z + floor_he.z;
+        assert!((floor_top_z - (0.6 - 0.08)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn bin_decomposition_walls_top_at_rim() {
+        let pose =
+            Isometry3::from_parts(Translation3::new(0.0, 0.0, 0.6), UnitQuaternion::identity());
+        let parts = bin_decomposition(pose, Vector2::new(0.10, 0.10), 0.08, 0.01);
+        for (wall_pose, wall_he) in &parts[1..] {
+            let top_z = wall_pose.translation.z + wall_he.z;
+            assert!(
+                (top_z - 0.6).abs() < 1e-6,
+                "wall top expected at rim z=0.6, got {top_z}"
+            );
+        }
     }
 }
