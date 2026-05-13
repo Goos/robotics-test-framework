@@ -7,6 +7,10 @@ use rtf_sim::{
     recorder::Recorder,
 };
 
+fn rerun_color_from(c: rtf_sim::primitive::Color) -> rerun::components::Color {
+    rerun::components::Color::from_unmultiplied_rgba(c.r, c.g, c.b, c.a)
+}
+
 pub struct RerunRecorder {
     stream: rerun::RecordingStream,
 }
@@ -44,18 +48,20 @@ impl Recorder for RerunRecorder {
                 Primitive::Sphere {
                     pose,
                     radius,
-                    color: _,
+                    color,
                 } => {
                     let pos = [pose.translation.x, pose.translation.y, pose.translation.z];
                     let _ = self.stream.log(
                         path.as_str(),
-                        &rerun::archetypes::Points3D::new([pos]).with_radii([*radius]),
+                        &rerun::archetypes::Points3D::new([pos])
+                            .with_radii([*radius])
+                            .with_colors([rerun_color_from(*color)]),
                     );
                 }
                 Primitive::Box {
                     pose,
                     half_extents,
-                    color: _,
+                    color,
                 } => {
                     let center = [pose.translation.x, pose.translation.y, pose.translation.z];
                     let half_size = [half_extents.x, half_extents.y, half_extents.z];
@@ -74,56 +80,46 @@ impl Recorder for RerunRecorder {
                             [center],
                             [half_size],
                         )
-                        .with_quaternions([quat]),
+                        .with_quaternions([quat])
+                        .with_colors([rerun_color_from(*color)]),
                     );
                 }
                 Primitive::Capsule {
                     pose,
                     half_height,
                     radius,
-                    color: _,
+                    color,
                 } => {
-                    // Fallback: render as two endpoint spheres + a connecting
-                    // line (logged at a sub-path so it doesn't overwrite the
-                    // points archetype). Rerun 0.21's
-                    // `Capsules3D::from_endpoints_and_radii` is gated behind
-                    // the `glam` feature, which the rerun crate doesn't
-                    // enable by default; revisit if a future rerun version
-                    // exposes endpoint construction unconditionally.
+                    let length = 2.0 * *half_height;
                     let dir_z = pose.rotation.transform_vector(&nalgebra::Vector3::z());
-                    let p1 = pose.translation.vector + dir_z * (*half_height);
-                    let p2 = pose.translation.vector - dir_z * (*half_height);
+                    let base = pose.translation.vector - dir_z * (*half_height);
+                    let q = pose.rotation;
                     let _ = self.stream.log(
                         path.as_str(),
-                        &rerun::archetypes::Points3D::new([[p1.x, p1.y, p1.z], [p2.x, p2.y, p2.z]])
-                            .with_radii([*radius, *radius]),
-                    );
-                    let line_path = format!("{path}/link");
-                    let _ = self.stream.log(
-                        line_path.as_str(),
-                        &rerun::archetypes::LineStrips3D::new([vec![
-                            [p1.x, p1.y, p1.z],
-                            [p2.x, p2.y, p2.z],
-                        ]]),
+                        &rerun::archetypes::Capsules3D::from_lengths_and_radii([length], [*radius])
+                            .with_translations([[base.x, base.y, base.z]])
+                            .with_quaternions([rerun::components::PoseRotationQuat(
+                                rerun::datatypes::Quaternion([q.i, q.j, q.k, q.w]),
+                            )])
+                            .with_colors([rerun_color_from(*color)]),
                     );
                 }
-                Primitive::Line { from, to, color: _ } => {
+                Primitive::Line { from, to, color } => {
                     let from_arr = [from.x, from.y, from.z];
                     let to_arr = [to.x, to.y, to.z];
                     let _ = self.stream.log(
                         path.as_str(),
-                        &rerun::archetypes::LineStrips3D::new([vec![from_arr, to_arr]]),
+                        &rerun::archetypes::LineStrips3D::new([vec![from_arr, to_arr]])
+                            .with_colors([rerun_color_from(*color)]),
                     );
                 }
-                Primitive::Label {
-                    pose,
-                    text,
-                    color: _,
-                } => {
+                Primitive::Label { pose, text, color } => {
                     let pos = [pose.translation.x, pose.translation.y, pose.translation.z];
                     let _ = self.stream.log(
                         path.as_str(),
-                        &rerun::archetypes::Points3D::new([pos]).with_labels([text.as_str()]),
+                        &rerun::archetypes::Points3D::new([pos])
+                            .with_labels([text.as_str()])
+                            .with_colors([rerun_color_from(*color)]),
                     );
                 }
             }
@@ -241,6 +237,42 @@ mod tests {
                 Primitive::Label {
                     pose: Isometry3::identity(),
                     text: "block".to_string(),
+                    color: Color::WHITE,
+                },
+            )],
+        });
+    }
+
+    #[test]
+    fn recorder_passes_color_to_box() {
+        use nalgebra::Vector3;
+        let mut rec = RerunRecorder::in_memory("test").unwrap();
+        rec.record(&SceneSnapshot {
+            t: Time::from_nanos(0),
+            items: vec![(
+                EntityId::Object(1),
+                Primitive::Box {
+                    pose: Isometry3::identity(),
+                    half_extents: Vector3::new(0.05, 0.05, 0.05),
+                    color: Color::RED,
+                },
+            )],
+        });
+    }
+
+    #[test]
+    fn recorder_renders_capsule_via_capsules3d_archetype() {
+        use nalgebra::{UnitQuaternion, Vector3};
+        let mut rec = RerunRecorder::in_memory("test").unwrap();
+        let rot = UnitQuaternion::from_axis_angle(&Vector3::z_axis(), std::f32::consts::FRAC_PI_4);
+        rec.record(&SceneSnapshot {
+            t: Time::from_nanos(0),
+            items: vec![(
+                EntityId::Object(1),
+                Primitive::Capsule {
+                    pose: Isometry3::from_parts(nalgebra::Translation3::new(0.0, 0.0, 0.5), rot),
+                    half_height: 0.2,
+                    radius: 0.04,
                     color: Color::WHITE,
                 },
             )],
