@@ -59,10 +59,8 @@ fn shape_to_collider(shape: &Shape) -> ColliderBuilder {
             half_height,
         } => {
             use nalgebra::{Translation3, UnitQuaternion, Vector3};
-            let q = UnitQuaternion::from_axis_angle(
-                &Vector3::x_axis(),
-                std::f32::consts::FRAC_PI_2,
-            );
+            let q =
+                UnitQuaternion::from_axis_angle(&Vector3::x_axis(), std::f32::consts::FRAC_PI_2);
             ColliderBuilder::cylinder(*half_height, *radius)
                 .position(Isometry3::from_parts(Translation3::identity(), q))
         }
