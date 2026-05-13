@@ -61,7 +61,19 @@ impl Arm {
     }
 }
 
-pub const LINK_RADIUS: f32 = 0.02;
+/// Radius (m) of the cylindrical arm-link capsules. Doubles as the
+/// Rapier collider radius and the rerun visualizer's capsule radius
+/// (both reads ride this single constant — see arm/src/world.rs and
+/// arm/src/arm.rs `append_primitives`).
+///
+/// Step VIS.1 (2026-05-12): bumped 0.02 → 0.04 to give the arm
+/// visible "real robot" proportions in the rerun viewer rather than
+/// the previous stick-figure look. Affects physics: arm-vs-block
+/// contact zones grow by 2 cm radially per link, slip-impulse
+/// interactions during ascend slightly different, sweep-controller
+/// finger geometry is unaffected (FINGER_HALF_EXTENTS unchanged).
+/// Sweep-based seed tests retuned in this same commit where needed.
+pub const LINK_RADIUS: f32 = 0.04;
 /// Half-extents of each finger pillar (small thin box, 4 cm long along
 /// EE +x). Phase 3.4.5d: long axis switched from EE +z to EE +x so it
 /// aligns with the wrist link direction; under the wrist alignment
