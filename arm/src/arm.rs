@@ -119,41 +119,30 @@ pub fn finger_pose(ee_pose: Isometry3<f32>, slot: u32, separation: f32) -> Isome
 
 impl Visualizable for Arm {
     fn append_primitives(&self, out: &mut Vec<(EntityId, Primitive)>) {
-        let mut acc = Isometry3::identity();
-        for (i, joint) in self.spec.joints.iter().enumerate() {
-            acc *= joint_transform(joint, self.state.q[i]);
-            let link_offset = self.spec.link_offsets[i];
-            let link_vec = link_offset.translation.vector;
-            let half_height = (link_vec.norm() / 2.0).max(0.001);
-            // Orient the capsule so its local +Z axis aligns with the link
-            // direction. Without this rotation the capsule "stick" would be
-            // drawn perpendicular to the actual link (since `Capsule`'s axis
-            // is local +Z but the link points wherever the offset translates).
-            let z_to_link = if link_vec.norm() > 0.0 {
-                UnitQuaternion::rotation_between(&Vector3::z(), &link_vec.normalize())
-                    .unwrap_or_else(UnitQuaternion::identity)
-            } else {
-                UnitQuaternion::identity()
-            };
-            let mid = acc * Isometry3::from_parts(Translation3::from(link_vec / 2.0), z_to_link);
+        for lp in self.link_poses() {
             out.push((
                 EntityId::Arm {
                     arm_id: self.id,
-                    slot: i as u32,
+                    slot: lp.slot,
                 },
                 Primitive::Capsule {
-                    pose: mid,
-                    half_height,
+                    pose: lp.pose,
+                    half_height: lp.half_height,
                     radius: LINK_RADIUS,
                     color: Color::WHITE,
                 },
             ));
-            acc *= link_offset;
         }
-        // Articulated gripper: two finger pillars whose lateral separation
-        // is the live `gripper_separation` (0.012 closed → 0.04 open after
-        // Phase 3.2). Both fingers protrude forward of the EE origin along
-        // its local +x (Phase 3.4.5d — aligns with the wrist link).
+        // Fingers: independent of link FK; computed from the EE pose, which
+        // we recompute by re-running FK once. `link_poses()` doesn't expose
+        // the EE pose explicitly (only link midpoints), and Commit 6 will
+        // fold finger rendering into `decoration_poses()` — so this local
+        // mini-FK is intentional scoping for now.
+        let mut acc = Isometry3::identity();
+        for (i, joint) in self.spec.joints.iter().enumerate() {
+            acc *= joint_transform(joint, self.state.q[i]);
+            acc *= self.spec.link_offsets[i];
+        }
         let separation = self.state.gripper_separation;
         for slot in [FINGER_SLOT_PLUS, FINGER_SLOT_MINUS] {
             out.push((
@@ -238,5 +227,48 @@ mod tests {
             "expected every emitted id to be EntityId::Arm; got {:?}",
             out.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
         );
+    }
+
+    #[test]
+    fn append_primitives_capsule_poses_match_link_poses() {
+        let spec = ArmSpec {
+            joints: vec![
+                JointSpec::Revolute {
+                    axis: Vector3::z_axis(),
+                    limits: (-3.2, 3.2),
+                };
+                3
+            ],
+            link_offsets: vec![Isometry3::translation(0.0, 0.0, 0.1); 3],
+            gripper: GripperSpec {
+                proximity_threshold: 0.02,
+                max_grasp_size: 0.05,
+            },
+        };
+        let mut state = ArmState::zeros(3);
+        state.q = vec![0.3, -0.4, 0.5];
+        let arm = Arm { spec, state, id: 0 };
+
+        let mut prims = Vec::new();
+        arm.append_primitives(&mut prims);
+        let link_poses = arm.link_poses();
+
+        for (i, lp) in link_poses.iter().enumerate() {
+            match &prims[i].1 {
+                Primitive::Capsule {
+                    pose, half_height, ..
+                } => {
+                    assert!(
+                        (pose.translation.vector - lp.pose.translation.vector).norm() < 1e-6,
+                        "link {i} translation mismatch",
+                    );
+                    assert!(
+                        (half_height - lp.half_height).abs() < 1e-6,
+                        "link {i} half_height mismatch",
+                    );
+                }
+                other => panic!("expected Capsule for link {i}, got {other:?}"),
+            }
+        }
     }
 }
