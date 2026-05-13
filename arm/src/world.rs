@@ -193,6 +193,14 @@ impl ArmWorld {
                     },
                 );
             }
+            // C5: arm decorations (foot, column; barrels + cuff added in C6).
+            // Static foot/column live in `arm_decoration_bodies` separate
+            // from `arm_link_bodies` so the joint-torque sensor doesn't see
+            // them; interaction groups (sim/physics §8.1) prevent same-arm
+            // link↔decoration self-contacts.
+            for d in arm.decoration_poses() {
+                pw.insert_arm_decoration(arm.id, d.slot, d.kind, &d.shape, d.pose);
+            }
             // Phase 3.1: insert two finger kinematic-cuboid bodies. Pose
             // is recomputed each tick from the (post-FK) EE pose +
             // current gripper_separation.

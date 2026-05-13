@@ -31,6 +31,49 @@ pub struct LinkPose {
 }
 
 impl Arm {
+    /// Visible (and physical) arm decorations: foot, column, joint barrels,
+    /// wrist cuff. Single source of truth for the renderer and the Rapier
+    /// insertion / per-tick sync path. C5 emits foot + column only;
+    /// barrels + cuff are added in C6.
+    ///
+    /// Foot + column are emitted ONLY when `link_offsets[0].translation.z`
+    /// is approximately 0.8 m — `BASE_COLUMN_HEIGHT = 0.745` is sized for
+    /// that gap. Minimal test arms (e.g. `(0,0,0.1)` link offsets) get an
+    /// empty decoration list rather than a column that ends mid-shoulder.
+    pub fn decoration_poses(&self) -> Vec<DecorationPose> {
+        use rtf_sim::physics::world::DecorationKind;
+        let mut out = Vec::new();
+        let has_standard_pedestal = !self.spec.link_offsets.is_empty()
+            && (self.spec.link_offsets[0].translation.z - 0.8).abs() < 1e-3;
+        if has_standard_pedestal {
+            out.push(DecorationPose {
+                slot: BASE_FOOT_SLOT,
+                shape: rtf_sim::shape::Shape::Cylinder {
+                    radius: BASE_FOOT_RADIUS,
+                    half_height: BASE_FOOT_HALF_HEIGHT,
+                },
+                pose: Isometry3::translation(0.0, 0.0, BASE_FOOT_HALF_HEIGHT),
+                color: rtf_sim::palette::JOINT_BLACK,
+                kind: DecorationKind::Static,
+            });
+            out.push(DecorationPose {
+                slot: BASE_COLUMN_SLOT,
+                shape: rtf_sim::shape::Shape::Cylinder {
+                    radius: BASE_COLUMN_RADIUS,
+                    half_height: BASE_COLUMN_HEIGHT * 0.5,
+                },
+                pose: Isometry3::translation(
+                    0.0,
+                    0.0,
+                    2.0 * BASE_FOOT_HALF_HEIGHT + BASE_COLUMN_HEIGHT * 0.5,
+                ),
+                color: rtf_sim::palette::LINK_WHITE,
+                kind: DecorationKind::Static,
+            });
+        }
+        out
+    }
+
     /// Compute the per-link capsule midpoint pose + half-height for every
     /// link in the kinematic chain. Used by the Rapier integration to
     /// keep arm-link kinematic body poses synced with FK each tick (and
@@ -95,6 +138,45 @@ pub const FINGER_FORWARD_OFFSET: f32 = 0.04;
 pub const FINGER_SLOT_PLUS: u32 = 998;
 pub const FINGER_SLOT_MINUS: u32 = 999;
 
+// Decoration geometry (foot, column, joint barrels, wrist cuff). The
+// foot+column visually fill the existing 0.8 m FK pedestal gap
+// (link_offsets[0].translation.z) so the arm appears to stand on its own
+// base instead of floating above the FK origin. No FK / IK refactor —
+// `link_offsets[0]` stays at z=0.8.
+pub const BASE_FOOT_RADIUS: f32 = 0.10;
+pub const BASE_FOOT_HALF_HEIGHT: f32 = 0.015;
+pub const BASE_COLUMN_RADIUS: f32 = 0.05;
+/// Sized to fill the existing 0.8 m FK gap minus foot height and the J0
+/// joint barrel half-length: `0.8 - 2*0.015 - 0.025 = 0.745`. If
+/// `link_offsets[0].translation.z` ever changes, this constant must
+/// change too — pinned by `decoration_poses_emits_foot_and_column_in_existing_pedestal_gap`.
+pub const BASE_COLUMN_HEIGHT: f32 = 0.745;
+pub const JOINT_BARREL_RADIUS: f32 = 0.055;
+pub const JOINT_BARREL_HALF_LENGTH: f32 = 0.025;
+pub const WRIST_CUFF_RADIUS: f32 = 0.05;
+pub const WRIST_CUFF_HALF_LENGTH: f32 = 0.015;
+
+/// Slot ids for arm decorations within `EntityId::Arm { slot, .. }`. Kept
+/// high so they don't collide with link slots (`0..n_joints`) or finger
+/// slots (998/999). Joint barrel `i` lives at `JOINT_BARREL_SLOT_BASE + i`.
+pub const BASE_FOOT_SLOT: u32 = 990;
+pub const BASE_COLUMN_SLOT: u32 = 991;
+pub const WRIST_CUFF_SLOT: u32 = 997;
+pub const JOINT_BARREL_SLOT_BASE: u32 = 800;
+
+/// Visible (and physical) decoration geometry for one arm. Single source
+/// of truth: consumed by both the renderer (`Arm::append_primitives`) and
+/// the Rapier insertion path (`arm/src/world.rs::ArmWorld::new`). See
+/// design §6.4, §8.1.
+#[derive(Clone, Copy, Debug)]
+pub struct DecorationPose {
+    pub slot: u32,
+    pub shape: rtf_sim::shape::Shape,
+    pub pose: Isometry3<f32>,
+    pub color: rtf_sim::primitive::Color,
+    pub kind: rtf_sim::physics::world::DecorationKind,
+}
+
 /// Compute the world-space pose of one finger given the EE pose, finger
 /// slot (+y or -y side), and current lateral separation. Shared by the
 /// visualization (`append_primitives`) and the per-tick physics-pose
@@ -129,8 +211,43 @@ impl Visualizable for Arm {
                     pose: lp.pose,
                     half_height: lp.half_height,
                     radius: LINK_RADIUS,
-                    color: Color::WHITE,
+                    color: rtf_sim::palette::LINK_WHITE,
                 },
+            ));
+        }
+        for d in self.decoration_poses() {
+            // Foot is rendered as a flat Box. With BASE_FOOT_RADIUS=0.10
+            // and BASE_FOOT_HALF_HEIGHT=0.015, the Cylinder→Capsule
+            // fallback produces hemispherical caps of radius 0.10 — a
+            // sphere visually, not a foot. A Box of the equivalent square
+            // footprint reads as a recognizable base. Rapier collider
+            // stays a Cylinder (set in insert_arm_decoration).
+            let prim = match d.shape {
+                rtf_sim::shape::Shape::Cylinder {
+                    radius,
+                    half_height,
+                } if d.slot == BASE_FOOT_SLOT => Primitive::Box {
+                    pose: d.pose,
+                    half_extents: Vector3::new(radius, radius, half_height),
+                    color: d.color,
+                },
+                rtf_sim::shape::Shape::Cylinder {
+                    radius,
+                    half_height,
+                } => Primitive::Capsule {
+                    pose: d.pose,
+                    half_height,
+                    radius,
+                    color: d.color,
+                },
+                _ => continue,
+            };
+            out.push((
+                EntityId::Arm {
+                    arm_id: self.id,
+                    slot: d.slot,
+                },
+                prim,
             ));
         }
         // Fingers: independent of link FK; computed from the EE pose, which
@@ -168,6 +285,58 @@ mod tests {
     use nalgebra::{Isometry3, Vector3};
     use rtf_sim::primitive::Primitive;
     use rtf_sim::visualizable::Visualizable;
+
+    #[test]
+    fn decoration_poses_emits_foot_and_column_in_existing_pedestal_gap() {
+        let spec = ArmSpec {
+            joints: vec![JointSpec::Revolute {
+                axis: Vector3::z_axis(),
+                limits: (-3.2, 3.2),
+            }],
+            link_offsets: vec![Isometry3::translation(0.0, 0.0, 0.8)],
+            gripper: GripperSpec {
+                proximity_threshold: 0.02,
+                max_grasp_size: 0.05,
+            },
+        };
+        let arm = Arm {
+            spec,
+            state: ArmState::zeros(1),
+            id: 0,
+        };
+        let decos = arm.decoration_poses();
+        assert_eq!(decos.len(), 2, "C5 emits foot + column only");
+        let foot = decos.iter().find(|d| d.slot == BASE_FOOT_SLOT).unwrap();
+        let column = decos.iter().find(|d| d.slot == BASE_COLUMN_SLOT).unwrap();
+        // Foot top at z = 0.030 (foot_center=0.015 + half_height=0.015).
+        assert!((foot.pose.translation.z + BASE_FOOT_HALF_HEIGHT - 0.030).abs() < 1e-6);
+        // Column top at z = 0.030 + 0.745 = 0.775; rim of J0 barrel sits
+        // at z ∈ [0.775, 0.825] in C6. Column TOP must NOT exceed 0.8.
+        let column_top = column.pose.translation.z + BASE_COLUMN_HEIGHT * 0.5;
+        assert!((column_top - 0.775).abs() < 1e-6);
+    }
+
+    #[test]
+    fn decoration_poses_empty_for_non_standard_pedestal() {
+        // Minimal test arm with link_offsets[0].z != 0.8 → no foot/column.
+        let spec = ArmSpec {
+            joints: vec![JointSpec::Revolute {
+                axis: Vector3::z_axis(),
+                limits: (-3.2, 3.2),
+            }],
+            link_offsets: vec![Isometry3::translation(0.0, 0.0, 0.1)],
+            gripper: GripperSpec {
+                proximity_threshold: 0.02,
+                max_grasp_size: 0.05,
+            },
+        };
+        let arm = Arm {
+            spec,
+            state: ArmState::zeros(1),
+            id: 0,
+        };
+        assert_eq!(arm.decoration_poses().len(), 0);
+    }
 
     #[test]
     fn appends_n_capsules_and_two_finger_boxes() {

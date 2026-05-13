@@ -10,7 +10,9 @@ use rapier3d::{
         CCDSolver, FixedJointBuilder, ImpulseJointHandle, ImpulseJointSet, IntegrationParameters,
         IslandManager, MultibodyJointSet, RigidBodyBuilder, RigidBodyHandle, RigidBodySet,
     },
-    geometry::{BroadPhaseMultiSap, ColliderBuilder, ColliderSet, NarrowPhase},
+    geometry::{
+        BroadPhaseMultiSap, ColliderBuilder, ColliderSet, Group, InteractionGroups, NarrowPhase,
+    },
     pipeline::PhysicsPipeline,
 };
 
@@ -21,6 +23,34 @@ use rapier3d::{
 pub use rapier3d::dynamics::RigidBodyType;
 
 use crate::{fixture::Fixture, object::Object, object::ObjectId, shape::Shape};
+
+/// Rapier collision-group bitmask convention. See
+/// `.claude/plans/2026-05-12-realistic-shapes-design-final.md` §8.1.
+/// Bits chosen so per-collider filters can be expressed as plain `|`s.
+pub mod groups {
+    pub const ARM_LINK: u32 = 0x0001;
+    pub const ARM_DECORATION: u32 = 0x0002;
+    pub const FIXTURE: u32 = 0x0004;
+    pub const OBJECT: u32 = 0x0008;
+    pub const ARM_FINGER: u32 = 0x0010;
+}
+
+fn groups_for(membership: u32, filter: u32) -> InteractionGroups {
+    InteractionGroups::new(
+        Group::from_bits_truncate(membership),
+        Group::from_bits_truncate(filter),
+    )
+}
+
+/// Static or kinematic-position-based body classification for an arm
+/// decoration. Lives in `rtf_sim` so both the arm crate (which builds
+/// `decoration_poses()`) and this module (which inserts them into Rapier)
+/// can name the same type without `sim → arm` dep inversion.
+#[derive(Copy, Clone, Debug)]
+pub enum DecorationKind {
+    Static,
+    Kinematic,
+}
 
 /// Shape descriptor for an arm-link kinematic capsule. Keeps the
 /// `insert_arm_link` API free of `Shape` (which would tempt callers to
@@ -107,6 +137,12 @@ pub struct PhysicsWorld {
     /// keyed by `(arm_id, finger_slot)` (finger_slot is the per-arm
     /// FINGER_SLOT_PLUS/MINUS = 998/999 from `arm::arm`). Phase 3.1.
     arm_finger_bodies: BTreeMap<(u32, u32), RigidBodyHandle>,
+    /// Decoration bodies (foot, column, joint barrels, wrist cuff) keyed
+    /// by `(arm_id, slot)`. Kept SEPARATE from `arm_link_bodies` so the
+    /// joint-torque sensor (`arm_link_external_contacts`) — which iterates
+    /// `arm_link_bodies` — never picks up a decoration contact and projects
+    /// a spurious moment onto a joint axis. Design §8.1.
+    arm_decoration_bodies: BTreeMap<(u32, u32), RigidBodyHandle>,
     /// Phase 3.5: handles of `FixedJoint`s currently coupling an arm
     /// kinematic body to a held object's dynamic body. Indexed by
     /// `ObjectId` since at most one joint exists per held object. The
@@ -145,6 +181,7 @@ impl PhysicsWorld {
             fixture_bodies: BTreeMap::new(),
             arm_link_bodies: BTreeMap::new(),
             arm_finger_bodies: BTreeMap::new(),
+            arm_decoration_bodies: BTreeMap::new(),
             grasp_joints: BTreeMap::new(),
         }
     }
@@ -200,6 +237,14 @@ impl PhysicsWorld {
         let collider = shape_to_collider(&obj.shape)
             .mass(obj.mass)
             .friction(obj.friction)
+            .collision_groups(groups_for(
+                groups::OBJECT,
+                groups::ARM_LINK
+                    | groups::ARM_DECORATION
+                    | groups::FIXTURE
+                    | groups::OBJECT
+                    | groups::ARM_FINGER,
+            ))
             .build();
         self.collider_set
             .insert_with_parent(collider, handle, &mut self.rigid_body_set);
@@ -216,7 +261,13 @@ impl PhysicsWorld {
         // High friction (vs Rapier default 0.5) on fixtures keeps a
         // dynamic block from sliding far after a transient arm-link
         // push (matters for the find-by-touch sweep/grasp sequence).
-        let collider = shape_to_collider(&fix.shape).friction(2.0).build();
+        let collider = shape_to_collider(&fix.shape)
+            .friction(2.0)
+            .collision_groups(groups_for(
+                groups::FIXTURE,
+                groups::ARM_LINK | groups::ARM_DECORATION | groups::OBJECT | groups::ARM_FINGER,
+            ))
+            .build();
         self.collider_set
             .insert_with_parent(collider, handle, &mut self.rigid_body_set);
         self.fixture_bodies.insert(fix.id, handle);
@@ -239,6 +290,10 @@ impl PhysicsWorld {
         let handle = self.rigid_body_set.insert(body);
         let collider = ColliderBuilder::capsule_z(shape.half_height, shape.radius)
             .friction(2.0)
+            .collision_groups(groups_for(
+                groups::ARM_LINK,
+                groups::FIXTURE | groups::OBJECT,
+            ))
             .build();
         self.collider_set
             .insert_with_parent(collider, handle, &mut self.rigid_body_set);
@@ -275,6 +330,7 @@ impl PhysicsWorld {
         let collider = ColliderBuilder::cuboid(half_extents.x, half_extents.y, half_extents.z)
             .friction(1.0)
             .sensor(is_sensor)
+            .collision_groups(groups_for(groups::ARM_FINGER, groups::OBJECT))
             .build();
         self.collider_set
             .insert_with_parent(collider, handle, &mut self.rigid_body_set);
@@ -286,6 +342,46 @@ impl PhysicsWorld {
     /// for tests that want to peek at finger body state.
     pub fn finger_handle(&self, arm_id: u32, slot: u32) -> Option<RigidBodyHandle> {
         self.arm_finger_bodies.get(&(arm_id, slot)).copied()
+    }
+
+    /// Insert an arm decoration body (foot, column, joint barrel, wrist
+    /// cuff). `Static` for foot/column; `Kinematic` for barrels and the
+    /// cuff (whose poses are updated each tick from FK). Decoration
+    /// colliders join the `ARM_DECORATION` group and only collide with
+    /// `FIXTURE | OBJECT` — never with same-arm links (would be persistent
+    /// self-contact at co-located joint origins) and never with each other
+    /// or with fingers. Design §8.1.
+    pub fn insert_arm_decoration(
+        &mut self,
+        arm_id: u32,
+        slot: u32,
+        kind: DecorationKind,
+        shape: &Shape,
+        pose: Isometry3<f32>,
+    ) -> RigidBodyHandle {
+        let body = match kind {
+            DecorationKind::Static => RigidBodyBuilder::fixed().position(pose).build(),
+            DecorationKind::Kinematic => RigidBodyBuilder::kinematic_position_based()
+                .position(pose)
+                .build(),
+        };
+        let handle = self.rigid_body_set.insert(body);
+        let collider = shape_to_collider(shape)
+            .friction(2.0)
+            .collision_groups(groups_for(
+                groups::ARM_DECORATION,
+                groups::FIXTURE | groups::OBJECT,
+            ))
+            .build();
+        self.collider_set
+            .insert_with_parent(collider, handle, &mut self.rigid_body_set);
+        self.arm_decoration_bodies.insert((arm_id, slot), handle);
+        handle
+    }
+
+    /// Lookup the Rapier handle for an arm decoration. Mirrors `finger_handle`.
+    pub fn arm_decoration_handle(&self, arm_id: u32, slot: u32) -> Option<RigidBodyHandle> {
+        self.arm_decoration_bodies.get(&(arm_id, slot)).copied()
     }
 
     /// True iff the object's collider is currently in contact with BOTH
