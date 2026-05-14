@@ -14,7 +14,7 @@ use crate::ports::{
     EePoseReading, GripperCommand, JointEncoderReading, JointId, JointTorqueReading,
     JointVelocityCommand, PressureReading,
 };
-use crate::spec::ArmSpec;
+use crate::spec::{ArmSpec, JointSpec};
 use crate::state::ArmState;
 
 /// Deferred Object insertion: pop from the schedule the first time the
@@ -479,6 +479,25 @@ impl ArmWorld {
         // Forward-Euler integrate joint positions: q += q_dot * dt.
         for i in 0..self.arm.state.q.len() {
             self.arm.state.q[i] += self.arm.state.q_dot[i] * dt_s;
+        }
+
+        // Enforce joint position limits: clamp to [min, max] and zero
+        // velocity when a limit is hit to prevent wind-up.
+        for (i, joint_spec) in self.arm.spec.joints.iter().enumerate() {
+            let (lo, hi) = match joint_spec {
+                JointSpec::Revolute { limits, .. } | JointSpec::Prismatic { limits, .. } => *limits,
+            };
+            if self.arm.state.q[i] <= lo {
+                self.arm.state.q[i] = lo;
+                if self.arm.state.q_dot[i] < 0.0 {
+                    self.arm.state.q_dot[i] = 0.0;
+                }
+            } else if self.arm.state.q[i] >= hi {
+                self.arm.state.q[i] = hi;
+                if self.arm.state.q_dot[i] > 0.0 {
+                    self.arm.state.q_dot[i] = 0.0;
+                }
+            }
         }
 
         // Drain gripper command; latest across all ports wins. Collected
