@@ -297,9 +297,9 @@ impl ArmWorld {
             .map(|i| self.attach_joint_encoder_sensor(JointId(i as u32), RateHz::new(1000)))
             .collect();
         let velocity_txs = (0..n)
-            .map(|i| self.attach_joint_velocity_actuator(JointId(i as u32)))
+            .map(|i| self.attach_joint_velocity_actuator(JointId(i as u32), None))
             .collect();
-        let gripper_tx = self.attach_gripper_actuator();
+        let gripper_tx = self.attach_gripper_actuator(None);
         StandardArmPorts {
             encoder_rxs,
             velocity_txs,

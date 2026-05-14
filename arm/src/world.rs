@@ -91,12 +91,14 @@ pub(crate) struct ArmContactPublisher {
 pub(crate) struct JointVelocityConsumer {
     pub joint: JointId,
     pub rx: PortRx<JointVelocityCommand>,
+    pub scheduler: Option<RateScheduler>,
 }
 
 /// Gripper command receiver. Consumed in Step 3.11d.
 #[allow(dead_code)]
 pub(crate) struct GripperConsumer {
     pub rx: PortRx<GripperCommand>,
+    pub scheduler: Option<RateScheduler>,
 }
 
 /// Tickable arm world: scene + arm + per-tick port registries (design v2 §5.7).
@@ -344,23 +346,30 @@ impl ArmWorld {
     pub fn attach_joint_velocity_actuator(
         &mut self,
         joint: JointId,
+        rate: Option<RateHz>,
     ) -> PortTx<JointVelocityCommand> {
         let (tx, rx) = rtf_core::port::port::<JointVelocityCommand>();
         let port_id = PortId(self.next_port_id);
         self.next_port_id += 1;
+        let scheduler = rate
+            .filter(|r| r.0 > 0)
+            .map(|r| RateScheduler::new_hz(r.0));
         self.actuators_joint_velocity
-            .insert(port_id, JointVelocityConsumer { joint, rx });
+            .insert(port_id, JointVelocityConsumer { joint, rx, scheduler });
         tx
     }
 
     /// Register a gripper-command actuator. Returns the sender end; the world
     /// retains the receiver and drains it during `consume_actuators` (Step 3.11d).
-    pub fn attach_gripper_actuator(&mut self) -> PortTx<GripperCommand> {
+    pub fn attach_gripper_actuator(&mut self, rate: Option<RateHz>) -> PortTx<GripperCommand> {
         let (tx, rx) = rtf_core::port::port::<GripperCommand>();
         let port_id = PortId(self.next_port_id);
         self.next_port_id += 1;
+        let scheduler = rate
+            .filter(|r| r.0 > 0)
+            .map(|r| RateScheduler::new_hz(r.0));
         self.actuators_gripper
-            .insert(port_id, GripperConsumer { rx });
+            .insert(port_id, GripperConsumer { rx, scheduler });
         tx
     }
 
@@ -462,6 +471,7 @@ impl ArmWorld {
     /// trait method can delegate here without recursing into itself.
     pub fn consume_actuators_and_integrate_inner(&mut self, dt: Duration) {
         let dt_s = dt.as_nanos() as f32 / 1.0e9_f32;
+        let dt_ns = dt.as_nanos();
 
         // Drain joint-velocity commands; latest wins per port. Collect first
         // so we don't hold a borrow on `self.actuators_joint_velocity` while
@@ -470,7 +480,14 @@ impl ArmWorld {
         let updates: Vec<(JointId, f32)> = self
             .actuators_joint_velocity
             .values_mut()
-            .filter_map(|cons| cons.rx.latest().map(|cmd| (cmd.joint, cmd.q_dot_target)))
+            .filter_map(|cons| {
+                let should_process = cons.scheduler.as_mut().map_or(true, |s| s.tick(dt_ns));
+                if should_process {
+                    cons.rx.latest().map(|cmd| (cmd.joint, cmd.q_dot_target))
+                } else {
+                    None
+                }
+            })
             .collect();
         for (joint, q_dot_target) in updates {
             self.arm.state.q_dot[joint.0 as usize] = q_dot_target;
@@ -505,7 +522,14 @@ impl ArmWorld {
         let gripper_cmd: Option<GripperCommand> = self
             .actuators_gripper
             .values_mut()
-            .filter_map(|cons| cons.rx.latest())
+            .filter_map(|cons| {
+                let should_process = cons.scheduler.as_mut().map_or(true, |s| s.tick(dt_ns));
+                if should_process {
+                    cons.rx.latest()
+                } else {
+                    None
+                }
+            })
             .last();
 
         if let Some(cmd) = gripper_cmd {
@@ -1075,7 +1099,7 @@ mod tests {
         // close (0.04 → 0.012) takes ~56 ms. Drive 200 ms to be safely
         // past convergence.
         let mut world = ArmWorld::new(Scene::new(0), simple_spec(), false);
-        let g_tx = world.attach_gripper_actuator();
+        let g_tx = world.attach_gripper_actuator(None);
         let initial = world.arm.state.gripper_separation;
         g_tx.send(GripperCommand {
             target_separation: 0.012,
@@ -1107,7 +1131,7 @@ mod tests {
         // slowed the slew to 0.5 m/s, so it takes ~40 ms (not one tick)
         // to cross the threshold.
         let mut world = ArmWorld::new(Scene::new(0), simple_spec(), false);
-        let g_tx = world.attach_gripper_actuator();
+        let g_tx = world.attach_gripper_actuator(None);
         assert!(!world.arm.state.gripper_closed);
         g_tx.send(GripperCommand {
             target_separation: 0.012,
@@ -1146,7 +1170,7 @@ mod tests {
         // (snap to 0.012 in Step 3.1's apply_gripper_command) should
         // move the finger bodies inward (lower |y| relative to EE).
         let mut world = ArmWorld::new(Scene::new(0), simple_spec(), true);
-        let g_tx = world.attach_gripper_actuator();
+        let g_tx = world.attach_gripper_actuator(None);
 
         // First, drive one tick with the gripper open (default state) so
         // the kinematic interpolation lands on the open pose.
@@ -1240,7 +1264,7 @@ mod tests {
         let mut world = ArmWorld::new(Scene::new(0), simple_spec(), false);
         let rx0 = world.attach_joint_torque_sensor(JointId(0), RateHz::new(1000));
         let rx1 = world.attach_joint_torque_sensor(JointId(1), RateHz::new(1000));
-        let v_tx = world.attach_joint_velocity_actuator(JointId(0));
+        let v_tx = world.attach_joint_velocity_actuator(JointId(0), None);
         v_tx.send(JointVelocityCommand {
             joint: JointId(0),
             q_dot_target: 1.0,
@@ -1275,7 +1299,7 @@ mod tests {
         ));
         let mut world = ArmWorld::new(scene, moving_ee_spec(), /* gravity */ false);
         let rx = world.attach_joint_torque_sensor(JointId(0), RateHz::new(1000));
-        let v_tx = world.attach_joint_velocity_actuator(JointId(0));
+        let v_tx = world.attach_joint_velocity_actuator(JointId(0), None);
         v_tx.send(JointVelocityCommand {
             joint: JointId(0),
             q_dot_target: 1.5,
@@ -1319,7 +1343,7 @@ mod tests {
             ));
             let mut world = ArmWorld::new(scene, moving_ee_spec(), false);
             let rx = world.attach_joint_torque_sensor(JointId(0), RateHz::new(1000));
-            let v_tx = world.attach_joint_velocity_actuator(JointId(0));
+            let v_tx = world.attach_joint_velocity_actuator(JointId(0), None);
             v_tx.send(JointVelocityCommand {
                 joint: JointId(0),
                 q_dot_target: q_dot,
@@ -1414,7 +1438,7 @@ mod tests {
         ));
         let mut world = ArmWorld::new(scene, moving_ee_spec(), false);
         let rx = world.attach_arm_contact_sensor(RateHz::new(1000));
-        let v_tx = world.attach_joint_velocity_actuator(JointId(0));
+        let v_tx = world.attach_joint_velocity_actuator(JointId(0), None);
         v_tx.send(JointVelocityCommand {
             joint: JointId(0),
             q_dot_target: 1.5,
@@ -1456,7 +1480,7 @@ mod tests {
         use rtf_sim::physics::world::RigidBodyType;
 
         let mut world = build_pick_and_place_world();
-        let g_tx = world.attach_gripper_actuator();
+        let g_tx = world.attach_gripper_actuator(None);
         g_tx.send(GripperCommand {
             target_separation: 0.012,
         });
@@ -1511,7 +1535,7 @@ mod tests {
         // Gravity off so the block stays put while the fingers slew.
         let mut world = ArmWorld::new(scene, simple_spec(), /* gravity */ false);
 
-        let g_tx = world.attach_gripper_actuator();
+        let g_tx = world.attach_gripper_actuator(None);
         g_tx.send(GripperCommand {
             target_separation: 0.012,
         });
@@ -1561,7 +1585,7 @@ mod tests {
         });
         let mut world = ArmWorld::new(scene, simple_spec(), /* gravity */ false);
 
-        let g_tx = world.attach_gripper_actuator();
+        let g_tx = world.attach_gripper_actuator(None);
         g_tx.send(GripperCommand {
             target_separation: 0.012,
         });
@@ -1622,7 +1646,7 @@ mod tests {
         });
         let mut world = ArmWorld::new(scene, moving_ee_spec(), /* gravity */ false);
 
-        let g_tx = world.attach_gripper_actuator();
+        let g_tx = world.attach_gripper_actuator(None);
         g_tx.send(GripperCommand {
             target_separation: 0.012,
         });
@@ -1638,7 +1662,7 @@ mod tests {
         );
 
         // Apply a large J0 velocity step and let the object swing out.
-        let v_tx = world.attach_joint_velocity_actuator(JointId(0));
+        let v_tx = world.attach_joint_velocity_actuator(JointId(0), None);
         v_tx.send(JointVelocityCommand {
             joint: JointId(0),
             q_dot_target: 10.0,
@@ -1690,7 +1714,7 @@ mod tests {
         });
         let mut world = ArmWorld::new(scene, simple_spec(), /* gravity */ true);
 
-        let g_tx = world.attach_gripper_actuator();
+        let g_tx = world.attach_gripper_actuator(None);
         g_tx.send(GripperCommand {
             target_separation: 0.012,
         });
@@ -1831,7 +1855,7 @@ mod tests {
             lin_vel: Vector3::zeros(),
         });
         let mut world = ArmWorld::new(scene, simple_spec(), /* gravity */ false);
-        let g_tx = world.attach_gripper_actuator();
+        let g_tx = world.attach_gripper_actuator(None);
         g_tx.send(GripperCommand {
             target_separation: 0.012,
         });
@@ -1894,7 +1918,7 @@ mod tests {
         let mut world = ArmWorld::new(scene, moving_ee_spec(), /* gravity */ false);
 
         let pose0 = world.scene.object(block).unwrap().pose;
-        let tx = world.attach_joint_velocity_actuator(JointId(0));
+        let tx = world.attach_joint_velocity_actuator(JointId(0), None);
         tx.send(JointVelocityCommand {
             joint: JointId(0),
             q_dot_target: 1.5,
@@ -1970,14 +1994,14 @@ mod tests {
     #[test]
     fn attach_velocity_actuator_returns_tx_and_registers_consumer() {
         let mut world = ArmWorld::new(Scene::new(0), simple_spec(), true);
-        let _tx = world.attach_joint_velocity_actuator(JointId(0));
+        let _tx = world.attach_joint_velocity_actuator(JointId(0), None);
         assert_eq!(world.actuators_joint_velocity.len(), 1);
     }
 
     #[test]
     fn attach_gripper_returns_tx_and_registers_consumer() {
         let mut world = ArmWorld::new(Scene::new(0), simple_spec(), true);
-        let _tx = world.attach_gripper_actuator();
+        let _tx = world.attach_gripper_actuator(None);
         assert_eq!(world.actuators_gripper.len(), 1);
     }
 
@@ -2014,7 +2038,7 @@ mod tests {
     fn velocity_command_advances_joint_position() {
         use rtf_core::time::Duration;
         let mut world = ArmWorld::new(Scene::new(0), simple_spec(), true);
-        let tx = world.attach_joint_velocity_actuator(JointId(0));
+        let tx = world.attach_joint_velocity_actuator(JointId(0), None);
         tx.send(JointVelocityCommand {
             joint: JointId(0),
             q_dot_target: 1.0,
@@ -2061,7 +2085,7 @@ mod tests {
         // the slew window.
         let mut world = ArmWorld::new(scene, simple_spec(), false);
 
-        let g_tx = world.attach_gripper_actuator();
+        let g_tx = world.attach_gripper_actuator(None);
         g_tx.send(GripperCommand {
             target_separation: 0.012,
         });
@@ -2122,8 +2146,8 @@ mod tests {
         // the slew window.
         let mut world = ArmWorld::new(scene, moving_ee_spec(), false);
 
-        let v_tx = world.attach_joint_velocity_actuator(JointId(0));
-        let g_tx = world.attach_gripper_actuator();
+        let v_tx = world.attach_joint_velocity_actuator(JointId(0), None);
+        let g_tx = world.attach_gripper_actuator(None);
         g_tx.send(GripperCommand {
             target_separation: 0.012,
         });

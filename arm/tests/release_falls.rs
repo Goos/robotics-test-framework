@@ -68,9 +68,9 @@ fn object_grasped_then_released_falls_to_table() {
     ));
     let mut world = ArmWorld::new(scene, spec, /* gravity */ true);
     let _v_txs: Vec<_> = (0..3)
-        .map(|i| world.attach_joint_velocity_actuator(JointId(i as u32)))
+        .map(|i| world.attach_joint_velocity_actuator(JointId(i as u32), None))
         .collect();
-    let g_tx = world.attach_gripper_actuator();
+    let g_tx = world.attach_gripper_actuator(None);
 
     // Phase 1: close gripper → grasp. Phase 3.2 slews separation at
     // 0.5 m/s, so going from open (0.04) to below the closed threshold

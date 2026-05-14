@@ -44,7 +44,7 @@ fn run_reach_pose_with_faults_with(rrd_name: &str, debug_overlay: bool) -> rtf_h
         .map(|i| world.attach_joint_encoder_sensor(JointId(i as u32), RateHz::new(1000)))
         .collect();
     let velocity_txs: Vec<_> = (0..3)
-        .map(|i| world.attach_joint_velocity_actuator(JointId(i as u32)))
+        .map(|i| world.attach_joint_velocity_actuator(JointId(i as u32), None))
         .collect();
 
     // Compose inside-out: GaussianNoise wraps the raw rx, then Delay wraps
