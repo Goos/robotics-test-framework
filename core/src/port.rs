@@ -1,5 +1,7 @@
-use core::cell::RefCell;
+use core::cell::{Cell, RefCell};
 use std::rc::Rc;
+
+use crate::time::{Duration, Time};
 
 /// Read side of a single-slot LatestWins port. Implemented by the concrete
 /// `PortRx<T>` and (in later phases) by fault-injection wrappers.
@@ -7,6 +9,9 @@ use std::rc::Rc;
 pub trait PortReader<T> {
     fn latest(&self) -> Option<T>;
     fn take(&mut self) -> Option<T>;
+    fn age_at(&self, _now: Time) -> Option<Duration> {
+        None
+    }
 }
 
 /// Producer end of a `port::<T>()`. `Clone`-able by design — many-producer,
@@ -15,12 +20,14 @@ pub trait PortReader<T> {
 #[derive(Clone)]
 pub struct PortTx<T> {
     slot: Rc<RefCell<Option<T>>>,
+    stamp: Rc<Cell<Option<Time>>>,
 }
 
 /// Consumer end of a `port::<T>()`. **Intentionally not `Clone`** to enforce
 /// the single-consumer invariant (design v2 §4 amendment).
 pub struct PortRx<T> {
     slot: Rc<RefCell<Option<T>>>,
+    stamp: Rc<Cell<Option<Time>>>,
 }
 
 /// Construct a single-slot LatestWins channel: each `send` overwrites the
@@ -30,11 +37,13 @@ pub struct PortRx<T> {
 /// (design §10.2); requiring `Send` would block useful non-`Send` payloads.
 pub fn port<T: Clone + 'static>() -> (PortTx<T>, PortRx<T>) {
     let slot = Rc::new(RefCell::new(None));
+    let stamp = Rc::new(Cell::new(None));
     (
         PortTx {
             slot: Rc::clone(&slot),
+            stamp: Rc::clone(&stamp),
         },
-        PortRx { slot },
+        PortRx { slot, stamp },
     )
 }
 
@@ -42,6 +51,12 @@ impl<T> PortTx<T> {
     /// Overwrites any previously-sent value (LatestWins semantics).
     pub fn send(&self, v: T) {
         *self.slot.borrow_mut() = Some(v);
+    }
+
+    /// Overwrites value and records `at` as the send timestamp for age tracking.
+    pub fn send_at(&self, v: T, at: Time) {
+        *self.slot.borrow_mut() = Some(v);
+        self.stamp.set(Some(at));
     }
 }
 
@@ -52,6 +67,9 @@ impl<T: Clone> PortRx<T> {
     pub fn take(&mut self) -> Option<T> {
         self.slot.borrow_mut().take()
     }
+    pub fn age_at(&self, now: Time) -> Option<Duration> {
+        self.stamp.get().map(|sent| now - sent)
+    }
 }
 
 impl<T: Clone> PortReader<T> for PortRx<T> {
@@ -60,6 +78,9 @@ impl<T: Clone> PortReader<T> for PortRx<T> {
     }
     fn take(&mut self) -> Option<T> {
         Self::take(self)
+    }
+    fn age_at(&self, now: Time) -> Option<Duration> {
+        Self::age_at(self, now)
     }
 }
 
@@ -73,6 +94,9 @@ impl<T, R: ?Sized + PortReader<T>> PortReader<T> for Box<R> {
     }
     fn take(&mut self) -> Option<T> {
         (**self).take()
+    }
+    fn age_at(&self, now: Time) -> Option<Duration> {
+        (**self).age_at(now)
     }
 }
 

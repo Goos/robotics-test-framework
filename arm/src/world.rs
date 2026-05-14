@@ -779,12 +779,12 @@ impl ArmWorld {
         for pubr in self.sensors_joint_encoder.values_mut() {
             if pubr.scheduler.tick(dt_ns) {
                 let i = pubr.joint.0 as usize;
-                pubr.tx.send(JointEncoderReading {
+                pubr.tx.send_at(JointEncoderReading {
                     joint: pubr.joint,
                     q: self.arm.state.q[i],
                     q_dot: self.arm.state.q_dot[i],
                     sampled_at,
-                });
+                }, sampled_at);
             }
         }
 
@@ -801,7 +801,7 @@ impl ArmWorld {
         if let Some(pose) = ee_pose {
             for pubr in self.sensors_ee_pose.values_mut() {
                 if pubr.scheduler.tick(dt_ns) {
-                    pubr.tx.send(EePoseReading { pose, sampled_at });
+                    pubr.tx.send_at(EePoseReading { pose, sampled_at }, sampled_at);
                 }
             }
 
@@ -824,10 +824,10 @@ impl ArmWorld {
                             max_pressure = max_pressure.max((eps - d) / eps);
                         }
                     }
-                    pubr.tx.send(PressureReading {
+                    pubr.tx.send_at(PressureReading {
                         pressure: max_pressure,
                         sampled_at,
-                    });
+                    }, sampled_at);
                 }
             }
         }
@@ -895,11 +895,11 @@ impl ArmWorld {
                             let moment = r.cross(force);
                             tau += axis.dot(&moment);
                         }
-                        pubr.tx.send(JointTorqueReading {
+                        pubr.tx.send_at(JointTorqueReading {
                             joint: pubr.joint,
                             tau,
                             sampled_at,
-                        });
+                        }, sampled_at);
                     }
                 }
 
@@ -939,11 +939,11 @@ impl ArmWorld {
                         if !pubr.scheduler.tick(dt_ns) {
                             continue;
                         }
-                        pubr.tx.send(crate::ports::ArmContactReading {
+                        pubr.tx.send_at(crate::ports::ArmContactReading {
                             point_world: centroid,
                             impulse_world: impulse_sum,
                             sampled_at,
-                        });
+                        }, sampled_at);
                     }
                 }
             }

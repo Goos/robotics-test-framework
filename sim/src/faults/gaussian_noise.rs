@@ -5,7 +5,12 @@
 
 use core::cell::RefCell;
 
-use rtf_core::{noise_source::NoiseSource, port::PortReader, sensor_reading::Noise};
+use rtf_core::{
+    noise_source::NoiseSource,
+    port::PortReader,
+    sensor_reading::Noise,
+    time::{Duration, Time},
+};
 
 use crate::faults::pcg_noise_source::PcgNoiseSource;
 
@@ -42,6 +47,10 @@ impl<R: PortReader<T>, T: Clone + Noise> PortReader<T> for GaussianNoise<R, T> {
         let dyn_src: &mut dyn NoiseSource = &mut *src;
         r.apply_noise(dyn_src, self.stddev);
         Some(r)
+    }
+
+    fn age_at(&self, now: Time) -> Option<Duration> {
+        self.inner.age_at(now)
     }
 }
 

@@ -72,6 +72,10 @@ impl<R: PortReader<T>, T: Clone> PortReader<T> for Delay<R, T> {
         }
         latest
     }
+
+    fn age_at(&self, now: Time) -> Option<Duration> {
+        self.inner.borrow().age_at(now)
+    }
 }
 
 #[cfg(test)]
